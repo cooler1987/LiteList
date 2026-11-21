@@ -47,6 +47,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev
 
+      - name: Build Frontend Bundle
+        run: |
+          npm install --no-audit --no-fund
+          npm run build
+
       - name: Install Wails CLI & Sync Go Dependencies
         run: |
           go install github.com/wailsapp/wails/v2/cmd/wails@v2.10.2
@@ -55,7 +60,7 @@ jobs:
 
       - name: Build Binary
         run: |
-          wails build -clean -platform ${{ matrix.platform }} ${{ matrix.extra_flags }}
+          wails build -s -clean -platform ${{ matrix.platform }} ${{ matrix.extra_flags }}
 
       - name: Package Artifacts
         shell: bash
