@@ -12,17 +12,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Windows 64位（Linux 直接无 CGO 交叉编译单文件 EXE）
           - os: ubuntu-latest
             platform: windows/amd64
             extra_flags: ""
             artifact_name: LiteList-windows-amd64
-          # Linux 64位（适配 Ubuntu 24.04 WebKitGTK 4.1）
           - os: ubuntu-latest
             platform: linux/amd64
             extra_flags: "-tags webkit2_41"
             artifact_name: LiteList-linux-amd64
-          # macOS 通用版（Apple Silicon + Intel）
           - os: macos-latest
             platform: darwin/universal
             extra_flags: ""
@@ -39,6 +36,11 @@ jobs:
         with:
           go-version: "1.23"
 
+      - name: Setup Node.js (for bundling CM6 & Highlight.js)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
       - name: Install Linux GTK/WebKit Dependencies
         if: matrix.platform == 'linux/amd64'
         run: |
@@ -53,7 +55,7 @@ jobs:
 
       - name: Build Binary
         run: |
-          wails build -s -clean -platform ${{ matrix.platform }} ${{ matrix.extra_flags }}
+          wails build -clean -platform ${{ matrix.platform }} ${{ matrix.extra_flags }}
 
       - name: Package Artifacts
         shell: bash
