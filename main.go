@@ -409,28 +409,38 @@ func initAndMigrateDB(db *sql.DB, isNewFile bool) error {
 }
 
 func seedWelcomeNodes(db *sql.DB) {
-	welcomeMD := `# LiteList v2 使用指南
-
-主文件 `.llist` 保持纯文本 Markdown 结构，所有插入或引用的图片与附件会自动复制到程序同目录的 `files/` 文件夹中。
-
-## 1. 编辑器增强特性
-- **行号与语法高亮**：支持 Markdown 语法及常见代码块着色（` + "`go`" + ` / ` + "`python`" + ` / ` + "`js`" + ` / ` + "`sql`" + ` 等）
-- **文本多级折叠**：点击行号旁 ` + "`▾`" + ` 折叠标题章节或缩进列表，预览模式同样支持标题折叠
-- **三视图切换**：顶部支持「纯编辑 / 双栏对照 / 纯预览」（` + "`Ctrl+E`" + ` 快速切换）
-- **完整右键与查找**：编辑器内右键支持剪切复制粘贴、Markdown 排版、插图与折叠；` + "`Ctrl+F`" + ` / ` + "`Ctrl+H`" + ` 文内查找替换
-
-## 2. 图片与附件（自动归档至 files/）
-1. 直接截屏后在编辑区按 ` + "`Ctrl+V`" + ` 粘贴图片
-2. 直接将本地文件拖入窗口，或点击工具栏「插图/附件」
-3. 在 Markdown 中粘贴或引用本地路径，也会自动复制进 ` + "`files/`" + ` 并转为相对路径
-
-## 3. 代码高亮示例
-` + "```go\npackage main\n\nimport \"fmt\"\n\nfunc main() {\n\tfmt.Println(\"Hello, LiteList!\")\n}\n```" + `
-
-## 4. 交互待办列表
-- [x] 行号显示与代码/Markdown 高亮
-  - [x] 缩进子项也可在编辑区折叠
-- [ ] 在预览模式下直接点击我勾选试试`
+	welcomeMD := strings.Join([]string{
+		"# LiteList v2 使用指南",
+		"",
+		"主文件 `.llist` 保持纯文本 Markdown 结构，所有插入或引用的图片与附件会自动复制到程序同目录的 `files/` 文件夹中。",
+		"",
+		"## 1. 编辑器增强特性",
+		"- **行号与语法高亮**：支持 Markdown 语法及常见代码块着色（`go` / `python` / `js` / `sql` 等）",
+		"- **文本多级折叠**：点击行号旁 `▾` 折叠标题章节或缩进列表，预览模式同样支持标题折叠",
+		"- **三视图切换**：顶部支持「纯编辑 / 双栏对照 / 纯预览」（`Ctrl+E` 快速切换）",
+		"- **完整右键与查找**：编辑器内右键支持剪切复制粘贴、Markdown 排版、插图与折叠；`Ctrl+F` / `Ctrl+H` 文内查找替换",
+		"",
+		"## 2. 图片与附件（自动归档至 files/）",
+		"1. 直接截屏后在编辑区按 `Ctrl+V` 粘贴图片",
+		"2. 直接将本地文件拖入窗口，或点击工具栏「插图/附件」",
+		"3. 在 Markdown 中粘贴或引用本地路径，也会自动复制进 `files/` 并转为相对路径",
+		"",
+		"## 3. 代码高亮示例",
+		"```go",
+		"package main",
+		"",
+		"import \"fmt\"",
+		"",
+		"func main() {",
+		"\tfmt.Println(\"Hello, LiteList!\")",
+		"}",
+		"```",
+		"",
+		"## 4. 交互待办列表",
+		"- [x] 行号显示与代码/Markdown 高亮",
+		"  - [x] 缩进子项也可在编辑区折叠",
+		"- [ ] 在预览模式下直接点击我勾选试试",
+	}, "\n")
 
 	res, err := db.Exec(
 		`INSERT INTO nodes (parent_id, title, content, sort_order, is_expanded) VALUES (NULL, ?, ?, 1000.0, 1)`,
