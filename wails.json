@@ -3,8 +3,8 @@
   "name": "LiteList",
   "outputfilename": "LiteList",
   "assetdir": "frontend",
-  "frontend:install": "npm install --no-audit --no-fund",
-  "frontend:build": "npm run build",
+  "frontend:install": "",
+  "frontend:build": "",
   "author": {
     "name": "LiteList"
   },
