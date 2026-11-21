@@ -1,0 +1,1251 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LiteList</title>
+<style>
+  :root {
+    --bg: #ffffff;
+    --bg-sidebar: #f7f7f8;
+    --bg-hover: #ececef;
+    --bg-active: #e2ecff;
+    --bg-code: #f3f4f6;
+    --bg-modal: #ffffff;
+    --border: #e5e7eb;
+    --text: #1f2937;
+    --text-muted: #6b7280;
+    --accent: #2563eb;
+    --accent-soft: rgba(37, 99, 235, 0.14);
+    --danger: #dc2626;
+    --shadow: 0 12px 32px rgba(0, 0, 0, 0.14);
+    --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #18181b;
+      --bg-sidebar: #1f1f23;
+      --bg-hover: #2b2b30;
+      --bg-active: #1e3a5f;
+      --bg-code: #27272a;
+      --bg-modal: #222226;
+      --border: #303036;
+      --text: #e4e4e7;
+      --text-muted: #a1a1aa;
+      --accent: #60a5fa;
+      --accent-soft: rgba(96, 165, 250, 0.16);
+      --danger: #f87171;
+      --shadow: 0 14px 36px rgba(0, 0, 0, 0.45);
+    }
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    height: 100%; width: 100%; overflow: hidden;
+    background: var(--bg); color: var(--text);
+    font-family: var(--font-sans); font-size: 14px;
+    user-select: none;
+  }
+
+  /* 顶部极简工具栏 */
+  .topbar {
+    height: 40px; display: flex; align-items: center; justify-content: space-between;
+    padding: 0 12px; border-bottom: 1px solid var(--border); background: var(--bg-sidebar);
+    gap: 8px;
+  }
+  .topbar-left, .topbar-right { display: flex; align-items: center; gap: 6px; min-width: 0; }
+  .db-badge {
+    font-size: 12px; font-weight: 600; color: var(--text); padding: 3px 8px;
+    border-radius: 5px; background: var(--bg); border: 1px solid var(--border);
+    max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .btn {
+    height: 28px; padding: 0 10px; border-radius: 5px; border: 1px solid var(--border);
+    background: var(--bg); color: var(--text); font-size: 12px; cursor: pointer;
+    display: inline-flex; align-items: center; gap: 5px; white-space: nowrap;
+  }
+  .btn:hover { background: var(--bg-hover); }
+  .btn-primary { background: var(--accent); color: #fff; border-color: transparent; }
+  .btn-primary:hover { opacity: 0.9; background: var(--accent); }
+  .search-trigger {
+    width: 190px; justify-content: space-between; color: var(--text-muted);
+  }
+  .kbd {
+    font-family: var(--font-mono); font-size: 11px; padding: 1px 5px;
+    border-radius: 4px; border: 1px solid var(--border); background: var(--bg-sidebar);
+    color: var(--text-muted);
+  }
+  .save-status { font-size: 12px; color: var(--text-muted); padding: 0 6px; }
+  .save-status.dirty { color: var(--accent); font-weight: 500; }
+
+  /* 主体双栏 */
+  .main { display: flex; height: calc(100% - 40px); width: 100%; }
+  .sidebar {
+    width: 280px; min-width: 180px; max-width: 560px;
+    background: var(--bg-sidebar); border-right: 1px solid var(--border);
+    display: flex; flex-direction: column; flex-shrink: 0;
+  }
+  .sidebar-header {
+    padding: 8px 10px; display: flex; align-items: center; justify-content: space-between;
+    font-size: 11px; font-weight: 600; color: var(--text-muted); letter-spacing: 0.4px;
+    border-bottom: 1px solid var(--border);
+  }
+  .icon-btn {
+    width: 22px; height: 22px; border: none; background: transparent; color: var(--text-muted);
+    border-radius: 4px; cursor: pointer; font-size: 15px; display: inline-flex;
+    align-items: center; justify-content: center;
+  }
+  .icon-btn:hover { background: var(--bg-hover); color: var(--text); }
+
+  .tree-container {
+    flex: 1; overflow-y: auto; padding: 6px 4px; outline: none;
+  }
+  .tree-node {
+    position: relative; display: flex; align-items: center; height: 28px;
+    padding-right: 8px; border-radius: 5px; cursor: pointer; font-size: 13px;
+    color: var(--text); gap: 4px;
+  }
+  .tree-node:hover { background: var(--bg-hover); }
+  .tree-node.active { background: var(--bg-active); font-weight: 500; }
+  .tree-node.drop-before::before {
+    content: ''; position: absolute; left: 8px; right: 8px; top: -1px; height: 2px; background: var(--accent);
+  }
+  .tree-node.drop-after::after {
+    content: ''; position: absolute; left: 8px; right: 8px; bottom: -1px; height: 2px; background: var(--accent);
+  }
+  .tree-node.drop-inside { outline: 2px solid var(--accent); outline-offset: -2px; background: var(--accent-soft); }
+
+  .twist {
+    width: 18px; height: 18px; display: inline-flex; align-items: center; justify-content: center;
+    font-size: 10px; color: var(--text-muted); border-radius: 3px; flex-shrink: 0;
+  }
+  .twist:hover { background: var(--bg-hover); color: var(--text); }
+  .twist.leaf { visibility: hidden; pointer-events: none; }
+  .node-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--text-muted); flex-shrink: 0; opacity: 0.6; }
+  .tree-node.active .node-dot { background: var(--accent); opacity: 1; }
+  .node-label {
+    flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .node-rename-input {
+    flex: 1; height: 22px; border: 1px solid var(--accent); border-radius: 3px;
+    background: var(--bg); color: var(--text); font-size: 13px; padding: 0 5px; outline: none;
+  }
+
+  /* 拖拽分隔条 */
+  .resizer {
+    width: 4px; cursor: col-resize; background: transparent; flex-shrink: 0;
+    margin-left: -2px; z-index: 5; transition: background 0.15s;
+  }
+  .resizer:hover, .resizer.dragging { background: var(--accent); }
+
+  /* 右侧编辑与预览区 */
+  .editor-pane {
+    flex: 1; display: flex; flex-direction: column; min-width: 0; background: var(--bg);
+  }
+  .empty-state {
+    flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    color: var(--text-muted); gap: 10px; font-size: 13px;
+  }
+  .editor-header {
+    padding: 14px 24px 10px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 12px;
+  }
+  .title-input {
+    flex: 1; border: none; outline: none; background: transparent; color: var(--text);
+    font-size: 20px; font-weight: 700; font-family: var(--font-sans); user-select: text;
+  }
+  .mode-switch {
+    display: inline-flex; border: 1px solid var(--border); border-radius: 6px;
+    overflow: hidden; background: var(--bg-sidebar); flex-shrink: 0;
+  }
+  .mode-btn {
+    border: none; background: transparent; color: var(--text-muted); padding: 4px 10px;
+    font-size: 12px; cursor: pointer;
+  }
+  .mode-btn.active { background: var(--bg); color: var(--text); font-weight: 600; }
+
+  .editor-body { flex: 1; position: relative; overflow: hidden; display: flex; }
+  .md-textarea {
+    width: 100%; height: 100%; border: none; outline: none; resize: none;
+    padding: 18px 24px 48px; background: var(--bg); color: var(--text);
+    font-family: var(--font-mono); font-size: 14px; line-height: 1.7; user-select: text;
+  }
+  .md-preview {
+    width: 100%; height: 100%; overflow-y: auto; padding: 18px 24px 60px;
+    line-height: 1.75; user-select: text; cursor: text;
+  }
+  .md-preview.hidden, .md-textarea.hidden { display: none; }
+
+  /* Markdown 渲染样式 */
+  .md-preview h1, .md-preview h2, .md-preview h3, .md-preview h4 { margin: 1em 0 0.45em; font-weight: 700; line-height: 1.3; }
+  .md-preview h1 { font-size: 1.6em; border-bottom: 1px solid var(--border); padding-bottom: 0.25em; }
+  .md-preview h2 { font-size: 1.35em; }
+  .md-preview h3 { font-size: 1.15em; }
+  .md-preview p { margin: 0.6em 0; }
+  .md-preview ul, .md-preview ol { margin: 0.5em 0 0.5em 1.5em; }
+  .md-preview li { margin: 0.25em 0; }
+  .md-preview li.task-item { list-style: none; margin-left: -1.2em; display: flex; align-items: flex-start; gap: 7px; }
+  .md-preview input[type="checkbox"] { margin-top: 5px; width: 15px; height: 15px; accent-color: var(--accent); cursor: pointer; flex-shrink: 0; }
+  .md-preview .task-done { text-decoration: line-through; color: var(--text-muted); }
+  .md-preview code {
+    font-family: var(--font-mono); font-size: 0.9em; background: var(--bg-code);
+    padding: 2px 5px; border-radius: 4px;
+  }
+  .md-preview pre {
+    background: var(--bg-code); padding: 12px 14px; border-radius: 6px;
+    overflow-x: auto; margin: 0.8em 0; border: 1px solid var(--border);
+  }
+  .md-preview pre code { background: transparent; padding: 0; font-size: 13px; }
+  .md-preview blockquote {
+    border-left: 3px solid var(--accent); padding: 2px 12px; color: var(--text-muted);
+    margin: 0.7em 0; background: var(--bg-sidebar); border-radius: 0 4px 4px 0;
+  }
+  .md-preview hr { border: none; border-top: 1px solid var(--border); margin: 1.2em 0; }
+  .md-preview a { color: var(--accent); text-decoration: none; }
+  .md-preview a:hover { text-decoration: underline; }
+  .preview-placeholder { color: var(--text-muted); font-style: italic; }
+
+  /* 右键菜单 */
+  .context-menu {
+    position: fixed; z-index: 1000; min-width: 165px; background: var(--bg-modal);
+    border: 1px solid var(--border); border-radius: 7px; box-shadow: var(--shadow);
+    padding: 5px; display: none;
+  }
+  .context-menu.open { display: block; }
+  .ctx-item {
+    padding: 6px 10px; border-radius: 5px; font-size: 13px; cursor: pointer;
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .ctx-item:hover { background: var(--bg-hover); }
+  .ctx-item.danger { color: var(--danger); }
+  .ctx-sep { height: 1px; background: var(--border); margin: 4px 0; }
+
+  /* Ctrl+K 全局搜索面板 */
+  .modal-backdrop {
+    position: fixed; inset: 0; background: rgba(0, 0, 0, 0.35); z-index: 900;
+    display: none; align-items: flex-start; justify-content: center; padding-top: 12vh;
+  }
+  .modal-backdrop.open { display: flex; }
+  .search-modal {
+    width: 560px; max-width: 92vw; background: var(--bg-modal);
+    border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow);
+    overflow: hidden;
+  }
+  .search-input-wrap {
+    padding: 12px 14px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 8px;
+  }
+  .search-input {
+    flex: 1; border: none; outline: none; background: transparent; color: var(--text); font-size: 15px;
+  }
+  .search-results { max-height: 360px; overflow-y: auto; padding: 6px; }
+  .search-item {
+    padding: 8px 10px; border-radius: 6px; cursor: pointer;
+  }
+  .search-item:hover, .search-item.selected { background: var(--bg-active); }
+  .search-item-title { font-weight: 600; font-size: 13px; }
+  .search-item-path { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+  .search-item-snippet { font-size: 12px; color: var(--text-muted); margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .search-empty { padding: 24px; text-align: center; color: var(--text-muted); font-size: 13px; }
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="topbar-left">
+    <span class="db-badge" id="dbBadge" title="">LiteList</span>
+    <button class="btn" id="btnNewDB" title="新建 .llist 笔记库">新建库</button>
+    <button class="btn" id="btnOpenDB" title="打开已有 .llist 笔记库">打开库</button>
+    <button class="btn" id="btnExportMD" title="导出全部大纲为单个 Markdown 文件">导出 MD</button>
+  </div>
+  <div class="topbar-right">
+    <span class="save-status" id="saveStatus">已就绪</span>
+    <button class="btn search-trigger" id="btnSearchModal">
+      <span>搜索笔记...</span>
+      <span class="kbd">Ctrl+K</span>
+    </button>
+  </div>
+</header>
+
+<div class="main">
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-header">
+      <span>大纲目录</span>
+      <button class="icon-btn" id="btnAddRoot" title="新建根节点">+</button>
+    </div>
+    <div class="tree-container" id="treeContainer" tabindex="0"></div>
+  </aside>
+
+  <div class="resizer" id="resizer"></div>
+
+  <main class="editor-pane">
+    <div class="empty-state" id="emptyState">
+      <div>点击左侧节点开始编辑，或按 <b>+</b> 新建大纲节点</div>
+      <div style="font-size:12px;">树内快捷键：<span class="kbd">Enter</span> 新建同级 · <span class="kbd">Tab</span> 缩进 · <span class="kbd">Ctrl+K</span> 搜索</div>
+    </div>
+
+    <div id="editorContainer" style="display:none; flex-direction:column; height:100%;">
+      <div class="editor-header">
+        <input type="text" class="title-input" id="titleInput" placeholder="节点标题..." />
+        <div class="mode-switch" title="切换编辑 / 预览 (Ctrl+E)">
+          <button class="mode-btn" id="btnModeEdit">编辑</button>
+          <button class="mode-btn active" id="btnModePreview">预览</button>
+        </div>
+      </div>
+      <div class="editor-body">
+        <textarea class="md-textarea hidden" id="mdTextarea" placeholder="输入 Markdown 内容...（支持 # 标题、**粗体**、- [ ] 待办、代码块）"></textarea>
+        <div class="md-preview" id="mdPreview"></div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<!-- 右键菜单 -->
+<div class="context-menu" id="contextMenu">
+  <div class="ctx-item" data-action="addChild"><span>新建子节点</span></div>
+  <div class="ctx-item" data-action="addSibling"><span>新建同级节点</span><span class="kbd">Enter</span></div>
+  <div class="ctx-item" data-action="rename"><span>重命名</span><span class="kbd">F2</span></div>
+  <div class="ctx-sep"></div>
+  <div class="ctx-item danger" data-action="delete"><span>删除节点</span><span class="kbd">Del</span></div>
+</div>
+
+<!-- Ctrl+K 快速搜索弹窗 -->
+<div class="modal-backdrop" id="searchBackdrop">
+  <div class="search-modal">
+    <div class="search-input-wrap">
+      <input type="text" class="search-input" id="searchInput" placeholder="输入关键词搜索标题或 Markdown 正文..." />
+      <span class="kbd">ESC</span>
+    </div>
+    <div class="search-results" id="searchResults">
+      <div class="search-empty">输入关键词以检索节点</div>
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+  // ===== 1. 后端调用桥接（兼容 Wails 与纯浏览器离线预览） =====
+  const hasWails = !!(window.go && window.go.main && window.go.main.App);
+  const mockStore = {
+    seq: 3,
+    nodes: [
+      { id: 1, parentId: 0, title: '示例根节点（浏览器预览模式）', sortOrder: 1000, isExpanded: true, content: '# LiteList\n- [ ] 测试待办事项\n- [x] 已完成事项' },
+      { id: 2, parentId: 1, title: '子节点示例', sortOrder: 1000, isExpanded: true, content: '按 `Ctrl+E` 或双击切换编辑模式。' }
+    ]
+  };
+  const api = hasWails ? window.go.main.App : {
+    GetAppInfo: async () => ({ dbPath: 'preview.llist', dbName: 'preview.llist (Mock)', platform: 'browser' }),
+    OpenDB: async () => {},
+    SelectAndOpenDB: async () => '',
+    CreateNewDB: async () => '',
+    GetTree: async () => mockStore.nodes.map(({ content, ...rest }) => rest),
+    GetNodeContent: async (id) => {
+      const n = mockStore.nodes.find(x => x.id === id);
+      return n ? { id: n.id, title: n.title, content: n.content || '', updatedAt: '' } : { id, title: '', content: '' };
+    },
+    CreateNode: async (parentId, title) => {
+      const n = { id: ++mockStore.seq, parentId, title, sortOrder: Date.now(), isExpanded: true, content: '' };
+      mockStore.nodes.push(n);
+      return n;
+    },
+    CreateNodeAt: async (parentId, title, sortOrder) => {
+      const n = { id: ++mockStore.seq, parentId, title, sortOrder, isExpanded: true, content: '' };
+      mockStore.nodes.push(n);
+      return n;
+    },
+    RenameNode: async (id, title) => { const n = mockStore.nodes.find(x => x.id === id); if (n) n.title = title; },
+    UpdateNodeContent: async (id, content) => { const n = mockStore.nodes.find(x => x.id === id); if (n) n.content = content; },
+    UpdateNode: async (id, title, content) => { const n = mockStore.nodes.find(x => x.id === id); if (n) { n.title = title; n.content = content; } },
+    SetNodeExpanded: async (id, exp) => { const n = mockStore.nodes.find(x => x.id === id); if (n) n.isExpanded = exp; },
+    MoveNode: async (id, newParentId, newSortOrder) => { const n = mockStore.nodes.find(x => x.id === id); if (n) { n.parentId = newParentId; n.sortOrder = newSortOrder; } },
+    DeleteNode: async (id) => { mockStore.nodes = mockStore.nodes.filter(x => x.id !== id && x.parentId !== id); return 1; },
+    SearchNodes: async (kw) => mockStore.nodes.filter(x => (x.title + x.content).toLowerCase().includes(kw.toLowerCase())).map(x => ({ id: x.id, parentId: x.parentId, title: x.title, snippet: x.content.slice(0, 60) })),
+    ExportMarkdown: async () => '',
+    SetDirty: async () => {},
+    ForceQuit: async () => {},
+    OpenExternalURL: async (url) => window.open(url, '_blank')
+  };
+
+  // ===== 2. 零依赖、天生防 XSS 的轻量 Markdown 解析器 =====
+  function escapeHTML(str) {
+    return str.replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+  }
+
+  function renderInline(escaped) {
+    let s = escaped;
+    const inlineCodes = [];
+    s = s.replace(/`([^`]+)`/g, (_, code) => {
+      inlineCodes.push(`<code>${code}</code>`);
+      return `\x00IC${inlineCodes.length - 1}\x00`;
+    });
+    s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" data-ext-url="$2">$1</a>');
+    s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    s = s.replace(/~~([^~]+)~~/g, '<del>$1</del>');
+    s = s.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+    s = s.replace(/\x00IC(\d+)\x00/g, (_, idx) => inlineCodes[Number(idx)]);
+    return s;
+  }
+
+  function renderMarkdown(raw) {
+    if (!raw || !raw.trim()) {
+      return '<p class="preview-placeholder">暂无内容，双击此处或按 Ctrl+E 开始编写 Markdown...</p>';
+    }
+    const lines = raw.replace(/\r\n/g, '\n').split('\n');
+    const out = [];
+    let i = 0;
+    let listType = null; // 'ul' | 'ol'
+
+    const closeList = () => {
+      if (listType) {
+        out.push(`</${listType}>`);
+        listType = null;
+      }
+    };
+
+    while (i < lines.length) {
+      const line = lines[i];
+
+      // 代码块 ```
+      if (/^```/.test(line.trim())) {
+        closeList();
+        const codeLines = [];
+        i++;
+        while (i < lines.length && !/^```/.test(lines[i].trim())) {
+          codeLines.push(escapeHTML(lines[i]));
+          i++;
+        }
+        out.push(`<pre><code>${codeLines.join('\n')}</code></pre>`);
+        i++;
+        continue;
+      }
+
+      // 分割线
+      if (/^\s*(?:---|\*\*\*|___)\s*$/.test(line)) {
+        closeList();
+        out.push('<hr>');
+        i++;
+        continue;
+      }
+
+      // 标题 #
+      const hMatch = line.match(/^(#{1,6})\s+(.+)$/);
+      if (hMatch) {
+        closeList();
+        const lvl = hMatch[1].length;
+        out.push(`<h${lvl}>${renderInline(escapeHTML(hMatch[2]))}</h${lvl}>`);
+        i++;
+        continue;
+      }
+
+      // 引用 >
+      const bqMatch = line.match(/^>\s?(.*)$/);
+      if (bqMatch) {
+        closeList();
+        const bqLines = [];
+        while (i < lines.length && /^>\s?/.test(lines[i])) {
+          bqLines.push(renderInline(escapeHTML(lines[i].replace(/^>\s?/, ''))));
+          i++;
+        }
+        out.push(`<blockquote><p>${bqLines.join('<br>')}</p></blockquote>`);
+        continue;
+      }
+
+      // 待办列表 - [ ] 或 - [x]
+      const taskMatch = line.match(/^\s*[-*]\s+\[([ xX])\]\s*(.*)$/);
+      if (taskMatch) {
+        if (listType !== 'ul') { closeList(); out.push('<ul>'); listType = 'ul'; }
+        const checked = taskMatch[1].toLowerCase() === 'x';
+        const textHtml = renderInline(escapeHTML(taskMatch[2]));
+        out.push(`<li class="task-item"><input type="checkbox" data-line="${i}" ${checked ? 'checked' : ''}><span class="${checked ? 'task-done' : ''}">${textHtml}</span></li>`);
+        i++;
+        continue;
+      }
+
+      // 无序列表 - / *
+      const ulMatch = line.match(/^\s*[-*]\s+(.+)$/);
+      if (ulMatch) {
+        if (listType !== 'ul') { closeList(); out.push('<ul>'); listType = 'ul'; }
+        out.push(`<li>${renderInline(escapeHTML(ulMatch[1]))}</li>`);
+        i++;
+        continue;
+      }
+
+      // 有序列表 1.
+      const olMatch = line.match(/^\s*\d+\.\s+(.+)$/);
+      if (olMatch) {
+        if (listType !== 'ol') { closeList(); out.push('<ol>'); listType = 'ol'; }
+        out.push(`<li>${renderInline(escapeHTML(olMatch[1]))}</li>`);
+        i++;
+        continue;
+      }
+
+      closeList();
+      if (!line.trim()) {
+        i++;
+        continue;
+      }
+
+      // 普通段落
+      const pLines = [];
+      while (
+        i < lines.length &&
+        lines[i].trim() !== '' &&
+        !/^(#{1,6}\s|```|>\s?|\s*[-*]\s|\s*\d+\.\s|\s*(?:---|\*\*\*|___)\s*$)/.test(lines[i])
+      ) {
+        pLines.push(renderInline(escapeHTML(lines[i])));
+        i++;
+      }
+      out.push(`<p>${pLines.join('<br>')}</p>`);
+    }
+    closeList();
+    return out.join('\n');
+  }
+
+  // ===== 3. 全局状态与树索引 =====
+  const state = {
+    nodes: [],
+    nodeMap: new Map(),
+    childrenMap: new Map(),
+    visibleIds: [],
+    selectedId: 0,
+    renamingId: 0,
+    contextTargetId: 0,
+    mode: 'preview', // 'edit' | 'preview'
+    dirtyTitle: false,
+    dirtyContent: false,
+    saveTimer: null,
+    dragId: 0,
+    searchTimer: null,
+    searchResults: [],
+    searchIdx: 0
+  };
+
+  const els = {
+    dbBadge: document.getElementById('dbBadge'),
+    saveStatus: document.getElementById('saveStatus'),
+    sidebar: document.getElementById('sidebar'),
+    resizer: document.getElementById('resizer'),
+    treeContainer: document.getElementById('treeContainer'),
+    emptyState: document.getElementById('emptyState'),
+    editorContainer: document.getElementById('editorContainer'),
+    titleInput: document.getElementById('titleInput'),
+    mdTextarea: document.getElementById('mdTextarea'),
+    mdPreview: document.getElementById('mdPreview'),
+    btnModeEdit: document.getElementById('btnModeEdit'),
+    btnModePreview: document.getElementById('btnModePreview'),
+    contextMenu: document.getElementById('contextMenu'),
+    searchBackdrop: document.getElementById('searchBackdrop'),
+    searchInput: document.getElementById('searchInput'),
+    searchResults: document.getElementById('searchResults')
+  };
+
+  function rebuildIndexes() {
+    state.nodeMap.clear();
+    state.childrenMap.clear();
+    for (const n of state.nodes) {
+      state.nodeMap.set(n.id, n);
+      const pid = n.parentId || 0;
+      if (!state.childrenMap.has(pid)) state.childrenMap.set(pid, []);
+      state.childrenMap.get(pid).push(n);
+    }
+    for (const list of state.childrenMap.values()) {
+      list.sort((a, b) => (a.sortOrder - b.sortOrder) || (a.id - b.id));
+    }
+  }
+
+  function getBreadcrumb(nodeId) {
+    const parts = [];
+    let cur = state.nodeMap.get(nodeId);
+    let guard = 0;
+    while (cur && cur.parentId && guard++ < 50) {
+      const parent = state.nodeMap.get(cur.parentId);
+      if (!parent) break;
+      parts.unshift(parent.title);
+      cur = parent;
+    }
+    return parts.join(' / ');
+  }
+
+  function setStatus(text, isDirty = false) {
+    els.saveStatus.textContent = text;
+    els.saveStatus.classList.toggle('dirty', isDirty);
+    api.SetDirty(isDirty);
+  }
+
+  // ===== 4. 数据加载与防抖刷盘 =====
+  async function loadAppAndTree(preserveSelection = false) {
+    const info = await api.GetAppInfo();
+    els.dbBadge.textContent = info.dbName || 'LiteList';
+    els.dbBadge.title = info.dbPath || '';
+
+    state.nodes = (await api.GetTree()) || [];
+    rebuildIndexes();
+    renderTree();
+
+    if (preserveSelection && state.selectedId && state.nodeMap.has(state.selectedId)) {
+      return;
+    }
+    const roots = state.childrenMap.get(0) || [];
+    if (roots.length > 0) {
+      await selectNode(roots[0].id);
+    } else {
+      state.selectedId = 0;
+      els.emptyState.style.display = 'flex';
+      els.editorContainer.style.display = 'none';
+    }
+  }
+
+  async function flushPendingSave() {
+    clearTimeout(state.saveTimer);
+    if (!state.selectedId || (!state.dirtyTitle && !state.dirtyContent)) return;
+
+    const id = state.selectedId;
+    const title = els.titleInput.value.trim() || '未命名节点';
+    const content = els.mdTextarea.value;
+    const doTitle = state.dirtyTitle;
+    const doContent = state.dirtyContent;
+
+    state.dirtyTitle = false;
+    state.dirtyContent = false;
+    setStatus('保存中...', false);
+
+    try {
+      if (doTitle && doContent) {
+        await api.UpdateNode(id, title, content);
+      } else if (doTitle) {
+        await api.RenameNode(id, title);
+      } else if (doContent) {
+        await api.UpdateNodeContent(id, content);
+      }
+      const node = state.nodeMap.get(id);
+      if (node) {
+        node.title = title;
+        updateTreeNodeLabelDOM(id, title);
+      }
+      setStatus('已保存', false);
+    } catch (e) {
+      setStatus('保存失败', true);
+      console.error(e);
+    }
+  }
+
+  function scheduleSave(type) {
+    if (type === 'title') state.dirtyTitle = true;
+    if (type === 'content') state.dirtyContent = true;
+    setStatus('未保存...', true);
+    clearTimeout(state.saveTimer);
+    state.saveTimer = setTimeout(() => { flushPendingSave(); }, 500);
+  }
+
+  async function selectNode(id, forceEdit = false) {
+    if (state.selectedId === id && !forceEdit) {
+      renderTreeSelection();
+      return;
+    }
+    await flushPendingSave();
+
+    state.selectedId = id;
+    const node = state.nodeMap.get(id);
+    if (!node) return;
+
+    els.emptyState.style.display = 'none';
+    els.editorContainer.style.display = 'flex';
+    renderTreeSelection();
+
+    const detail = await api.GetNodeContent(id);
+    // 防止快速连点导致竞态覆盖
+    if (state.selectedId !== id) return;
+
+    els.titleInput.value = detail.title;
+    els.mdTextarea.value = detail.content || '';
+    state.dirtyTitle = false;
+    state.dirtyContent = false;
+    setStatus('已保存', false);
+
+    // 空白节点直接进入编辑态，有内容则进入预览态
+    const targetMode = (forceEdit || !(detail.content || '').trim()) ? 'edit' : 'preview';
+    setEditorMode(targetMode, false);
+  }
+
+  function setEditorMode(mode, focusArea = true) {
+    state.mode = mode;
+    if (mode === 'edit') {
+      els.btnModeEdit.classList.add('active');
+      els.btnModePreview.classList.remove('active');
+      els.mdTextarea.classList.remove('hidden');
+      els.mdPreview.classList.add('hidden');
+      if (focusArea) els.mdTextarea.focus();
+    } else {
+      els.btnModePreview.classList.add('active');
+      els.btnModeEdit.classList.remove('active');
+      els.mdPreview.innerHTML = renderMarkdown(els.mdTextarea.value);
+      els.mdPreview.classList.remove('hidden');
+      els.mdTextarea.classList.add('hidden');
+    }
+  }
+
+  // ===== 5. 大纲树渲染与交互 =====
+  function renderTree() {
+    state.visibleIds = [];
+    const frag = document.createDocumentFragment();
+
+    function walk(parentId, depth) {
+      const list = state.childrenMap.get(parentId) || [];
+      for (const n of list) {
+        state.visibleIds.push(n.id);
+        const kids = state.childrenMap.get(n.id) || [];
+        const hasKids = kids.length > 0;
+
+        const row = document.createElement('div');
+        row.className = 'tree-node' + (n.id === state.selectedId ? ' active' : '');
+        row.style.paddingLeft = `${8 + depth * 16}px`;
+        row.dataset.id = String(n.id);
+        row.draggable = state.renamingId !== n.id;
+
+        const twist = document.createElement('span');
+        twist.className = 'twist' + (hasKids ? '' : ' leaf');
+        twist.textContent = n.isExpanded ? '▼' : '▶';
+        twist.addEventListener('click', async (e) => {
+          e.stopPropagation();
+          await toggleExpand(n.id);
+        });
+
+        const dot = document.createElement('span');
+        dot.className = 'node-dot';
+
+        row.appendChild(twist);
+        row.appendChild(dot);
+
+        if (state.renamingId === n.id) {
+          const inp = document.createElement('input');
+          inp.type = 'text';
+          inp.className = 'node-rename-input';
+          inp.value = n.title;
+          let committed = false;
+          const commit = async (cancel) => {
+            if (committed) return;
+            committed = true;
+            state.renamingId = 0;
+            const newTitle = inp.value.trim();
+            if (!cancel && newTitle && newTitle !== n.title) {
+              n.title = newTitle;
+              await api.RenameNode(n.id, newTitle);
+              if (state.selectedId === n.id) els.titleInput.value = newTitle;
+            }
+            renderTree();
+            els.treeContainer.focus();
+          };
+          inp.addEventListener('keydown', (e) => {
+            e.stopPropagation();
+            if (e.key === 'Enter') commit(false);
+            else if (e.key === 'Escape') commit(true);
+          });
+          inp.addEventListener('blur', () => commit(false));
+          row.appendChild(inp);
+          setTimeout(() => { inp.focus(); inp.select(); }, 0);
+        } else {
+          const label = document.createElement('span');
+          label.className = 'node-label';
+          label.textContent = n.title;
+          row.appendChild(label);
+        }
+
+        // 点击选中
+        row.addEventListener('click', () => {
+          els.treeContainer.focus();
+          selectNode(n.id);
+        });
+        row.addEventListener('dblclick', () => startRename(n.id));
+        row.addEventListener('contextmenu', (e) => openContextMenu(e, n.id));
+
+        // 拖拽排序与层级调整
+        row.addEventListener('dragstart', (e) => {
+          state.dragId = n.id;
+          e.dataTransfer.effectAllowed = 'move';
+          e.dataTransfer.setData('text/plain', String(n.id));
+        });
+        row.addEventListener('dragover', (e) => {
+          if (!state.dragId || state.dragId === n.id) return;
+          e.preventDefault();
+          clearDropClasses(row);
+          const rect = row.getBoundingClientRect();
+          const ratio = (e.clientY - rect.top) / rect.height;
+          if (ratio < 0.28) row.classList.add('drop-before');
+          else if (ratio > 0.72) row.classList.add('drop-after');
+          else row.classList.add('drop-inside');
+        });
+        row.addEventListener('dragleave', () => clearDropClasses(row));
+        row.addEventListener('drop', async (e) => {
+          e.preventDefault();
+          const mode = row.classList.contains('drop-before') ? 'before'
+            : row.classList.contains('drop-after') ? 'after' : 'inside';
+          clearDropClasses(row);
+          if (state.dragId && state.dragId !== n.id) {
+            await handleDrop(state.dragId, n.id, mode);
+          }
+          state.dragId = 0;
+        });
+
+        frag.appendChild(row);
+        if (hasKids && n.isExpanded) {
+          walk(n.id, depth + 1);
+        }
+      }
+    }
+
+    walk(0, 0);
+    els.treeContainer.innerHTML = '';
+    els.treeContainer.appendChild(frag);
+  }
+
+  function clearDropClasses(el) {
+    el.classList.remove('drop-before', 'drop-after', 'drop-inside');
+  }
+
+  function renderTreeSelection() {
+    for (const el of els.treeContainer.querySelectorAll('.tree-node')) {
+      const id = Number(el.dataset.id);
+      el.classList.toggle('active', id === state.selectedId);
+      if (id === state.selectedId) {
+        el.scrollIntoView({ block: 'nearest' });
+      }
+    }
+  }
+
+  function updateTreeNodeLabelDOM(id, title) {
+    const row = els.treeContainer.querySelector(`.tree-node[data-id="${id}"] .node-label`);
+    if (row) row.textContent = title;
+  }
+
+  async function toggleExpand(id, forceVal = null) {
+    const node = state.nodeMap.get(id);
+    if (!node) return;
+    const next = forceVal !== null ? forceVal : !node.isExpanded;
+    if (node.isExpanded === next) return;
+    node.isExpanded = next;
+    await api.SetNodeExpanded(id, next);
+    renderTree();
+  }
+
+  function startRename(id) {
+    state.renamingId = id;
+    renderTree();
+  }
+
+  // ===== 6. 节点增删改移逻辑 =====
+  async function createChildNode(parentId) {
+    await flushPendingSave();
+    const created = await api.CreateNode(parentId, '新节点');
+    await loadAppAndTree(false);
+    await selectNode(created.id, true);
+    startRename(created.id);
+  }
+
+  async function createSiblingAfter(targetId) {
+    await flushPendingSave();
+    const target = state.nodeMap.get(targetId);
+    if (!target) return createChildNode(0);
+
+    const pid = target.parentId || 0;
+    const siblings = state.childrenMap.get(pid) || [];
+    const idx = siblings.findIndex(x => x.id === targetId);
+    let sortOrder = target.sortOrder + 1000.0;
+    if (idx >= 0 && idx + 1 < siblings.length) {
+      sortOrder = (target.sortOrder + siblings[idx + 1].sortOrder) / 2.0;
+    }
+    const created = await api.CreateNodeAt(pid, '新节点', sortOrder);
+    await loadAppAndTree(false);
+    await selectNode(created.id, true);
+    startRename(created.id);
+  }
+
+  async function deleteNodeConfirm(id) {
+    const node = state.nodeMap.get(id);
+    if (!node) return;
+    const kids = state.childrenMap.get(id) || [];
+    const msg = kids.length > 0
+      ? `确定删除「${node.title}」及其下属全部子节点吗？此操作不可撤销。`
+      : `确定删除节点「${node.title}」吗？`;
+    if (!confirm(msg)) return;
+
+    const visIdx = state.visibleIds.indexOf(id);
+    const fallbackId = state.visibleIds[visIdx + 1] || state.visibleIds[visIdx - 1] || 0;
+
+    state.dirtyTitle = false;
+    state.dirtyContent = false;
+    await api.DeleteNode(id);
+    state.selectedId = fallbackId;
+    await loadAppAndTree(fallbackId !== 0);
+    if (fallbackId && state.nodeMap.has(fallbackId)) {
+      await selectNode(fallbackId);
+    }
+    els.treeContainer.focus();
+  }
+
+  async function handleDrop(dragId, targetId, mode) {
+    const target = state.nodeMap.get(targetId);
+    if (!target) return;
+
+    let newParentId = target.parentId || 0;
+    let newSortOrder = 1000.0;
+
+    if (mode === 'inside') {
+      newParentId = targetId;
+      const kids = (state.childrenMap.get(targetId) || []).filter(x => x.id !== dragId);
+      newSortOrder = kids.length > 0 ? kids[kids.length - 1].sortOrder + 1000.0 : 1000.0;
+    } else {
+      const siblings = (state.childrenMap.get(newParentId) || []).filter(x => x.id !== dragId);
+      const idx = siblings.findIndex(x => x.id === targetId);
+      if (mode === 'before') {
+        const prev = idx > 0 ? siblings[idx - 1].sortOrder : target.sortOrder - 1000.0;
+        newSortOrder = (prev + target.sortOrder) / 2.0;
+      } else {
+        const next = idx + 1 < siblings.length ? siblings[idx + 1].sortOrder : target.sortOrder + 1000.0;
+        newSortOrder = (target.sortOrder + next) / 2.0;
+      }
+    }
+
+    try {
+      await api.MoveNode(dragId, newParentId, newSortOrder);
+      await loadAppAndTree(true);
+    } catch (err) {
+      alert(err);
+    }
+  }
+
+  async function indentNode(id) {
+    const node = state.nodeMap.get(id);
+    if (!node) return;
+    const siblings = state.childrenMap.get(node.parentId || 0) || [];
+    const idx = siblings.findIndex(x => x.id === id);
+    if (idx <= 0) return; // 第一个节点无法缩进
+
+    const newParent = siblings[idx - 1];
+    const targetKids = state.childrenMap.get(newParent.id) || [];
+    const sortOrder = targetKids.length > 0 ? targetKids[targetKids.length - 1].sortOrder + 1000.0 : 1000.0;
+    await api.MoveNode(id, newParent.id, sortOrder);
+    await loadAppAndTree(true);
+  }
+
+  async function outdentNode(id) {
+    const node = state.nodeMap.get(id);
+    if (!node || !node.parentId) return;
+    const parent = state.nodeMap.get(node.parentId);
+    if (!parent) return;
+
+    const grandParentId = parent.parentId || 0;
+    const aunts = state.childrenMap.get(grandParentId) || [];
+    const pIdx = aunts.findIndex(x => x.id === parent.id);
+    const nextOrder = pIdx + 1 < aunts.length ? aunts[pIdx + 1].sortOrder : parent.sortOrder + 1000.0;
+    const sortOrder = (parent.sortOrder + nextOrder) / 2.0;
+    await api.MoveNode(id, grandParentId, sortOrder);
+    await loadAppAndTree(true);
+  }
+
+  // ===== 7. 事件监听：大纲树键盘流 =====
+  els.treeContainer.addEventListener('keydown', async (e) => {
+    if (state.renamingId) return;
+    const id = state.selectedId;
+    if (!id) return;
+
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      const idx = state.visibleIds.indexOf(id);
+      if (idx >= 0 && idx + 1 < state.visibleIds.length) {
+        await selectNode(state.visibleIds[idx + 1]);
+      }
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      const idx = state.visibleIds.indexOf(id);
+      if (idx > 0) {
+        await selectNode(state.visibleIds[idx - 1]);
+      }
+    } else if (e.key === 'ArrowRight') {
+      e.preventDefault();
+      const node = state.nodeMap.get(id);
+      const kids = state.childrenMap.get(id) || [];
+      if (kids.length > 0) {
+        if (!node.isExpanded) await toggleExpand(id, true);
+        else await selectNode(kids[0].id);
+      }
+    } else if (e.key === 'ArrowLeft') {
+      e.preventDefault();
+      const node = state.nodeMap.get(id);
+      const kids = state.childrenMap.get(id) || [];
+      if (kids.length > 0 && node.isExpanded) {
+        await toggleExpand(id, false);
+      } else if (node.parentId) {
+        await selectNode(node.parentId);
+      }
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      if (e.shiftKey || e.ctrlKey || e.metaKey) await createChildNode(id);
+      else await createSiblingAfter(id);
+    } else if (e.key === 'Tab') {
+      e.preventDefault();
+      if (e.shiftKey) await outdentNode(id);
+      else await indentNode(id);
+    } else if (e.key === 'F2') {
+      e.preventDefault();
+      startRename(id);
+    } else if (e.key === 'Delete' || e.key === 'Backspace') {
+      e.preventDefault();
+      await deleteNodeConfirm(id);
+    }
+  });
+
+  // ===== 8. 右侧编辑器交互（自动保存 + Tab 缩进 + 列表续行 + 复选框直点） =====
+  els.titleInput.addEventListener('input', () => {
+    updateTreeNodeLabelDOM(state.selectedId, els.titleInput.value.trim() || '未命名节点');
+    scheduleSave('title');
+  });
+  els.titleInput.addEventListener('blur', () => flushPendingSave());
+
+  els.mdTextarea.addEventListener('input', () => scheduleSave('content'));
+  els.mdTextarea.addEventListener('blur', () => flushPendingSave());
+
+  els.mdTextarea.addEventListener('keydown', (e) => {
+    const ta = els.mdTextarea;
+    if (e.key === 'Tab') {
+      e.preventDefault();
+      const start = ta.selectionStart;
+      const end = ta.selectionEnd;
+      ta.value = ta.value.substring(0, start) + '  ' + ta.value.substring(end);
+      ta.selectionStart = ta.selectionEnd = start + 2;
+      scheduleSave('content');
+    } else if (e.key === 'Enter') {
+      const pos = ta.selectionStart;
+      const lineStart = ta.value.lastIndexOf('\n', pos - 1) + 1;
+      const currentLine = ta.value.slice(lineStart, pos);
+      const listMatch = currentLine.match(/^(\s*(?:[-*]\s+\[[ xX]\]\s|[-*]\s|\d+\.\s|>\s))(.*)$/);
+      if (listMatch) {
+        e.preventDefault();
+        if (listMatch[2].trim() === '') {
+          // 空列表项按回车取消列表前缀
+          ta.value = ta.value.slice(0, lineStart) + '\n' + ta.value.slice(pos);
+          ta.selectionStart = ta.selectionEnd = lineStart + 1;
+        } else {
+          let nextPrefix = listMatch[1].replace(/\[[xX]\]/, '[ ]');
+          const numMatch = nextPrefix.match(/^(\s*)(\d+)\.(\s)$/);
+          if (numMatch) nextPrefix = `${numMatch[1]}${Number(numMatch[2]) + 1}.${numMatch[3]}`;
+          ta.value = ta.value.slice(0, pos) + '\n' + nextPrefix + ta.value.slice(ta.selectionEnd);
+          ta.selectionStart = ta.selectionEnd = pos + 1 + nextPrefix.length;
+        }
+        scheduleSave('content');
+      }
+    }
+  });
+
+  els.btnModeEdit.addEventListener('click', () => setEditorMode('edit'));
+  els.btnModePreview.addEventListener('click', () => setEditorMode('preview'));
+  els.mdPreview.addEventListener('dblclick', (e) => {
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'A') return;
+    setEditorMode('edit');
+  });
+
+  // 预览模式下点击复选框直接修改源码并保存；点击链接交由系统浏览器打开
+  els.mdPreview.addEventListener('click', (e) => {
+    if (e.target.matches('input[type="checkbox"][data-line]')) {
+      const lineIdx = Number(e.target.dataset.line);
+      const lines = els.mdTextarea.value.replace(/\r\n/g, '\n').split('\n');
+      if (lines[lineIdx] !== undefined) {
+        lines[lineIdx] = e.target.checked
+          ? lines[lineIdx].replace(/\[ \]/, '[x]')
+          : lines[lineIdx].replace(/\[[xX]\]/, '[ ]');
+        els.mdTextarea.value = lines.join('\n');
+        els.mdPreview.innerHTML = renderMarkdown(els.mdTextarea.value);
+        scheduleSave('content');
+      }
+    } else if (e.target.matches('a[data-ext-url]')) {
+      e.preventDefault();
+      api.OpenExternalURL(e.target.dataset.extUrl);
+    }
+  });
+
+  // ===== 9. 全局快捷键（Ctrl+K / Ctrl+E / Ctrl+S）与右键菜单 =====
+  window.addEventListener('keydown', async (e) => {
+    const mod = e.ctrlKey || e.metaKey;
+    if (mod && e.key.toLowerCase() === 'k') {
+      e.preventDefault();
+      openSearchModal();
+    } else if (mod && e.key.toLowerCase() === 'e') {
+      if (state.selectedId) {
+        e.preventDefault();
+        setEditorMode(state.mode === 'edit' ? 'preview' : 'edit');
+      }
+    } else if (mod && e.key.toLowerCase() === 's') {
+      e.preventDefault();
+      await flushPendingSave();
+    } else if (e.key === 'Escape') {
+      closeContextMenu();
+      closeSearchModal();
+    }
+  });
+
+  function openContextMenu(e, nodeId) {
+    e.preventDefault();
+    state.contextTargetId = nodeId;
+    selectNode(nodeId);
+    els.contextMenu.style.left = `${Math.min(e.clientX, window.innerWidth - 180)}px`;
+    els.contextMenu.style.top = `${Math.min(e.clientY, window.innerHeight - 150)}px`;
+    els.contextMenu.classList.add('open');
+  }
+  function closeContextMenu() { els.contextMenu.classList.remove('open'); }
+  window.addEventListener('click', () => closeContextMenu());
+
+  els.contextMenu.addEventListener('click', async (e) => {
+    const item = e.target.closest('.ctx-item');
+    if (!item) return;
+    const action = item.dataset.action;
+    const id = state.contextTargetId;
+    closeContextMenu();
+    if (action === 'addChild') await createChildNode(id);
+    else if (action === 'addSibling') await createSiblingAfter(id);
+    else if (action === 'rename') startRename(id);
+    else if (action === 'delete') await deleteNodeConfirm(id);
+  });
+
+  // ===== 10. Ctrl+K 搜索面板 =====
+  function openSearchModal() {
+    els.searchBackdrop.classList.add('open');
+    els.searchInput.value = '';
+    state.searchResults = [];
+    state.searchIdx = 0;
+    els.searchResults.innerHTML = '<div class="search-empty">输入关键词以检索节点</div>';
+    els.searchInput.focus();
+  }
+  function closeSearchModal() {
+    els.searchBackdrop.classList.remove('open');
+  }
+  els.btnSearchModal = document.getElementById('btnSearchModal');
+  els.btnSearchModal.addEventListener('click', openSearchModal);
+  els.searchBackdrop.addEventListener('click', (e) => {
+    if (e.target === els.searchBackdrop) closeSearchModal();
+  });
+
+  els.searchInput.addEventListener('input', () => {
+    clearTimeout(state.searchTimer);
+    const kw = els.searchInput.value.trim();
+    if (!kw) {
+      state.searchResults = [];
+      els.searchResults.innerHTML = '<div class="search-empty">输入关键词以检索节点</div>';
+      return;
+    }
+    state.searchTimer = setTimeout(async () => {
+      state.searchResults = (await api.SearchNodes(kw)) || [];
+      state.searchIdx = 0;
+      renderSearchResults();
+    }, 180);
+  });
+
+  els.searchInput.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      if (state.searchIdx + 1 < state.searchResults.length) {
+        state.searchIdx++;
+        renderSearchResults();
+      }
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (state.searchIdx > 0) {
+        state.searchIdx--;
+        renderSearchResults();
+      }
+    } else if (e.key === 'Enter' && state.searchResults[state.searchIdx]) {
+      e.preventDefault();
+      jumpToSearchResult(state.searchResults[state.searchIdx].id);
+    }
+  });
+
+  function renderSearchResults() {
+    if (state.searchResults.length === 0) {
+      els.searchResults.innerHTML = '<div class="search-empty">未找到匹配节点</div>';
+      return;
+    }
+    els.searchResults.innerHTML = '';
+    state.searchResults.forEach((r, idx) => {
+      const div = document.createElement('div');
+      div.className = 'search-item' + (idx === state.searchIdx ? ' selected' : '');
+      const path = getBreadcrumb(r.id);
+      div.innerHTML = `
+        <div class="search-item-title">${escapeHTML(r.title)}</div>
+        ${path ? `<div class="search-item-path">${escapeHTML(path)}</div>` : ''}
+        ${r.snippet ? `<div class="search-item-snippet">${escapeHTML(r.snippet)}</div>` : ''}
+      `;
+      div.addEventListener('click', () => jumpToSearchResult(r.id));
+      els.searchResults.appendChild(div);
+    });
+  }
+
+  async function jumpToSearchResult(nodeId) {
+    closeSearchModal();
+    // 展开目标节点的所有祖先
+    let cur = state.nodeMap.get(nodeId);
+    while (cur && cur.parentId) {
+      const p = state.nodeMap.get(cur.parentId);
+      if (!p) break;
+      if (!p.isExpanded) {
+        p.isExpanded = true;
+        await api.SetNodeExpanded(p.id, true);
+      }
+      cur = p;
+    }
+    renderTree();
+    await selectNode(nodeId);
+  }
+
+  // ===== 11. 顶部工具栏与分栏拖拽 =====
+  document.getElementById('btnAddRoot').addEventListener('click', () => createChildNode(0));
+  document.getElementById('btnNewDB').addEventListener('click', async () => {
+    await flushPendingSave();
+    const p = await api.CreateNewDB();
+    if (p) await loadAppAndTree(false);
+  });
+  document.getElementById('btnOpenDB').addEventListener('click', async () => {
+    await flushPendingSave();
+    try {
+      const p = await api.SelectAndOpenDB();
+      if (p) await loadAppAndTree(false);
+    } catch (err) {
+      alert(err);
+    }
+  });
+  document.getElementById('btnExportMD').addEventListener('click', async () => {
+    await flushPendingSave();
+    const out = await api.ExportMarkdown();
+    if (out) setStatus('已导出 MD', false);
+  });
+
+  // 左右分隔条拖拽调整宽度
+  let resizing = false;
+  els.resizer.addEventListener('mousedown', () => {
+    resizing = true;
+    els.resizer.classList.add('dragging');
+  });
+  window.addEventListener('mousemove', (e) => {
+    if (!resizing) return;
+    const width = Math.max(180, Math.min(560, e.clientX));
+    els.sidebar.style.width = `${width}px`;
+  });
+  window.addEventListener('mouseup', () => {
+    if (resizing) {
+      resizing = false;
+      els.resizer.classList.remove('dragging');
+    }
+  });
+
+  // 监听后端关闭前的强制刷盘通知
+  if (window.runtime && window.runtime.EventsOn) {
+    window.runtime.EventsOn('app:request-flush', async () => {
+      await flushPendingSave();
+      await api.ForceQuit();
+    });
+  }
+
+  // 初始化启动
+  loadAppAndTree(false);
+})();
+</script>
+</body>
+</html>
