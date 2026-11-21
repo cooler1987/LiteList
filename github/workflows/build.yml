@@ -1,0 +1,93 @@
+name: Build LiteList
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Windows 64位（Linux 直接无 CGO 交叉编译单文件 EXE）
+          - os: ubuntu-latest
+            platform: windows/amd64
+            extra_flags: ""
+            artifact_name: LiteList-windows-amd64
+          # Linux 64位（适配 Ubuntu 24.04 WebKitGTK 4.1）
+          - os: ubuntu-latest
+            platform: linux/amd64
+            extra_flags: "-tags webkit2_41"
+            artifact_name: LiteList-linux-amd64
+          # macOS 通用版（Apple Silicon + Intel）
+          - os: macos-latest
+            platform: darwin/universal
+            extra_flags: ""
+            artifact_name: LiteList-macos-universal
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+
+      - name: Install Linux GTK/WebKit Dependencies
+        if: matrix.platform == 'linux/amd64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev
+
+      - name: Install Wails CLI & Sync Go Dependencies
+        run: |
+          go install github.com/wailsapp/wails/v2/cmd/wails@v2.10.2
+          echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
+          go mod tidy
+
+      - name: Build Binary
+        run: |
+          wails build -s -clean -platform ${{ matrix.platform }} ${{ matrix.extra_flags }}
+
+      - name: Package Artifacts
+        shell: bash
+        run: |
+          mkdir -p dist
+          if [[ "${{ matrix.platform }}" == "windows/amd64" ]]; then
+            cp build/bin/LiteList.exe dist/LiteList-windows-amd64.exe
+          elif [[ "${{ matrix.platform }}" == "linux/amd64" ]]; then
+            cp build/bin/LiteList dist/LiteList-linux-amd64
+            chmod +x dist/LiteList-linux-amd64
+          elif [[ "${{ matrix.platform }}" == "darwin/universal" ]]; then
+            ditto -c -k --sequesterRsrc --keepParent build/bin/LiteList.app dist/LiteList-macos-universal.zip
+          fi
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: dist/*
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download All Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-files
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-files/*
