@@ -74,7 +74,7 @@ public sealed class MarkdownScintilla : Scintilla
         TabWidth = 2;
         UseTabs = false;
         IndentWidth = 2;
-        UsePopup(false); // 禁用 Scintilla 默认右键，改用自定义 Markdown 右键菜单
+        UsePopup(false);
 
         Lexer = Lexer.Container;
         StyleNeeded += OnStyleNeeded;
@@ -95,26 +95,24 @@ public sealed class MarkdownScintilla : Scintilla
         var accent = ThemeHelper.ToWinFormsColor(dark ? "#60A5FA" : "#2563EB");
 
         StyleResetDefault();
-        // 使用系统默认中文界面字体，仅代码片段采用等宽字体
-        Styles[Style.Default].Font = SystemFonts.MessageFontFamily.Source;
-        Styles[Style.Default].Size = (int)Math.Round(fontSize * 0.78);
-        Styles[Style.Default].BackColor = bg;
-        Styles[Style.Default].ForeColor = fg;
+        Styles[ScintillaNET.Style.Default].Font = SystemFonts.MessageFontFamily.Source;
+        Styles[ScintillaNET.Style.Default].Size = (int)Math.Round(fontSize * 0.78);
+        Styles[ScintillaNET.Style.Default].BackColor = bg;
+        Styles[ScintillaNET.Style.Default].ForeColor = fg;
         StyleClearAll();
 
-        Styles[Style.LineNumber].BackColor = gutterBg;
-        Styles[Style.LineNumber].ForeColor = muted;
+        Styles[ScintillaNET.Style.LineNumber].BackColor = gutterBg;
+        Styles[ScintillaNET.Style.LineNumber].ForeColor = muted;
         SetFoldMarginColor(true, gutterBg);
         SetFoldMarginHighlightColor(true, gutterBg);
 
-        // 高对比光标与当前行高亮，绝不与背景同色
         CaretForeColor = ThemeHelper.ToWinFormsColor(dark ? "#FFFFFF" : "#111827");
         CaretWidth = 2;
         CaretLineVisible = true;
         CaretLineBackColor = ThemeHelper.ToWinFormsColor(dark ? "#25252D" : "#EFF6FF");
         SetSelectionBackColor(true, ThemeHelper.ToWinFormsColor(dark ? "#264F78" : "#BFDBFE"));
 
-        int basePt = Styles[Style.Default].Size;
+        int basePt = Styles[ScintillaNET.Style.Default].Size;
         Styles[StyleHeading].ForeColor = ThemeHelper.ToWinFormsColor(dark ? "#60A5FA" : "#1D4ED8");
         Styles[StyleHeading].Bold = true;
 
@@ -149,7 +147,6 @@ public sealed class MarkdownScintilla : Scintilla
         SetCodeStyle(StyleCodeString, dark ? "#A5D6FF" : "#032F62");
         SetCodeStyle(StyleCodeComment, dark ? "#8B949E" : "#6A737D", italic: true);
 
-        // 动态更新折叠槽颜色
         var foldFg = ThemeHelper.ToWinFormsColor(dark ? "#A1A1AA" : "#4B5563");
         for (int i = Marker.FolderEnd; i <= Marker.FolderOpen; i++)
         {
@@ -236,15 +233,14 @@ public sealed class MarkdownScintilla : Scintilla
         if (e.Char != '\n') return;
         int curLineIdx = CurrentLine;
         if (curLineIdx <= 0) return;
-        var prevText = Lines[curLineIdx - 1].Text.TrimEnd('\r', '\n');
+        var prevLine = Lines[curLineIdx - 1];
+        var prevText = prevLine.Text.TrimEnd('\r', '\n');
         var m = Regex.Match(prevText, @"^(\s*(?:[-*+]\s+\[[ xX]\]\s|[-*+]\s|\d+\.\s|>\s))(.*)$");
         if (!m.Success) return;
 
         if (string.IsNullOrWhiteSpace(m.Groups[2].Value))
         {
-            // 空列表行再按回车取消续行前缀
-            var prevLine = Lines[curLineIdx - 1];
-            DeleteRange(prevLine.Position, prevLine.Length - (prevLine.EndPosition - prevLine.Position > 0 ? 0 : 0));
+            DeleteRange(prevLine.Position, prevText.Length);
             return;
         }
         var prefix = Regex.Replace(m.Groups[1].Value, @"\[[xX]\]", "[ ]");
@@ -254,7 +250,6 @@ public sealed class MarkdownScintilla : Scintilla
         ReplaceSelection(prefix);
     }
 
-    // 增量词法着色：只计算当前需要绘制的行范围，通过前一行 EOL 字节风格判断代码块状态，O(可见行数)
     private void OnStyleNeeded(object? sender, StyleNeededEventArgs e)
     {
         int startPos = GetEndStyled();
@@ -295,7 +290,6 @@ public sealed class MarkdownScintilla : Scintilla
                 ApplyRegexStyle(styles, contentText, CodeKeywordRegex, StyleCodeKeyword);
                 ApplyRegexStyle(styles, contentText, CodeStringRegex, StyleCodeString);
                 ApplyRegexStyle(styles, contentText, CodeCommentRegex, StyleCodeComment);
-                // 保证末尾换行符携带 StyleCodeBlock 供下一行快速续接状态
                 for (int k = contentText.Length; k < totalChars; k++) styles[k] = StyleCodeBlock;
             }
             else
@@ -351,13 +345,9 @@ public sealed class MarkdownScintilla : Scintilla
         return level >= 1 && level <= 6 && (level == trimmed.Length || trimmed[level] == ' ');
     }
 
-    /// <summary>
-    /// 仅在载入节点或用户主动刷新/折叠时重算折叠层级，打字时不扫描全文
-    /// </summary>
     public void RebuildFoldLevels()
     {
         int count = Lines.Count;
-        int currentHeadingLvl = 0;
         bool insideFence = false;
 
         for (int i = 0; i < count; i++)
@@ -393,13 +383,11 @@ public sealed class MarkdownScintilla : Scintilla
 
             if (IsHeadingLine(trimmed, out int hLvl))
             {
-                currentHeadingLvl = hLvl;
                 line.FoldLevel = FoldLevelBase + hLvl;
                 line.FoldLevelFlags = FoldLevelFlags.Header;
                 continue;
             }
 
-            // 缩进列表折叠
             int indent = text.Length - trimmed.Length;
             bool isList = trimmed.StartsWith("- ", StringComparison.Ordinal) ||
                           trimmed.StartsWith("* ", StringComparison.Ordinal) ||
@@ -477,7 +465,6 @@ public sealed class MarkdownScintilla : Scintilla
         ClearSearchHighlights();
         if (string.IsNullOrEmpty(keyword)) return;
 
-        // 先用 Scintilla 高速原生搜索标亮所有相同词
         IndicatorCurrent = IndicatorAllMatch;
         SearchFlags = SearchFlags.None;
         TargetStart = 0;
@@ -492,7 +479,6 @@ public sealed class MarkdownScintilla : Scintilla
             TargetEnd = TextLength;
         }
 
-        // 精确定位并把目标行滚动到视图正中央
         int lineIdx = Math.Max(0, Math.Min(Lines.Count - 1, lineNumber1Based - 1));
         Lines[lineIdx].EnsureVisible();
         int centerTop = Math.Max(0, lineIdx - Math.Max(1, LinesOnScreen / 2));
@@ -521,8 +507,6 @@ public sealed class MarkdownScintilla : Scintilla
     }
 }
 
-// ===== 虚拟化预览数据结构与按块工厂（几十万字只实例化屏幕上可见块，内存恒定 30~60 MB） =====
-
 public sealed class PreviewBlockVM : INotifyPropertyChanged
 {
     private bool _isCollapsed;
@@ -530,7 +514,7 @@ public sealed class PreviewBlockVM : INotifyPropertyChanged
 
     public int StartLine { get; set; }
     public int EndLine { get; set; }
-    public int HeadingLevel { get; set; } // 0=普通块，1~6=标题
+    public int HeadingLevel { get; set; }
     public WpfBlock AstBlock { get; set; } = null!;
 
     public bool IsCollapsed
@@ -696,9 +680,6 @@ public sealed class VirtualizedMarkdownPreview
         return roots;
     }
 
-    /// <summary>
-    /// 按需为当前进入视口的单块创建轻量化 WPF 控件
-    /// </summary>
     public UIElement BuildBlockElement(PreviewBlockVM vm, double fontSize, string? highlightKw)
     {
         var el = RenderAstBlock(vm.AstBlock, vm, fontSize, highlightKw) ?? new TextBlock();
@@ -773,7 +754,6 @@ public sealed class VirtualizedMarkdownPreview
 
             case ParagraphBlock pb:
             {
-                // 如果段落只包含单张图片，直接返回图片容器以保持清晰自适应宽度
                 if (pb.Inline != null && pb.Inline.FirstChild == pb.Inline.LastChild &&
                     pb.Inline.FirstChild is LinkInline singleLi && singleLi.IsImage)
                 {
@@ -1152,7 +1132,6 @@ public sealed class VirtualizedMarkdownPreview
 
         try
         {
-            // 用 FileStream 读取，彻底避免路径中含 #、% 或特殊中文字符时 Uri 解析失败
             var bmp = new BitmapImage();
             using (var fs = new FileStream(resolved, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
             {
