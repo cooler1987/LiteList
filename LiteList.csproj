@@ -14,6 +14,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Reference Include="WindowsFormsIntegration" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="jacobslusser.ScintillaNET" Version="3.6.3" />
     <PackageReference Include="Markdig" Version="0.37.0" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.11" />
