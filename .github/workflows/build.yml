@@ -14,26 +14,29 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup .NET 8
+      - name: Setup .NET SDK (for building net48)
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: "8.0.x"
 
-      - name: Publish Single-File Portable EXE
+      - name: Restore and Build net48 x64
         run: |
-          dotnet publish LiteList.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o publish-out
+          dotnet restore LiteList.csproj
+          dotnet build LiteList.csproj -c Release --no-restore -o publish-out
 
-      - name: Package Artifact
+      - name: Package Portable ZIP
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Copy-Item "publish-out/LiteList.exe" "dist/LiteList-win10-x64.exe"
+          Remove-Item "publish-out/*.pdb" -ErrorAction SilentlyContinue
+          Remove-Item "publish-out/*.xml" -ErrorAction SilentlyContinue
+          Compress-Archive -Path "publish-out/*" -DestinationPath "dist/LiteList-win10-x64.zip" -Force
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: LiteList-win10-x64
-          path: dist/LiteList-win10-x64.exe
+          path: dist/LiteList-win10-x64.zip
 
   release:
     needs: build-win10
