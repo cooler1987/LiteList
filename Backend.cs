@@ -8,6 +8,7 @@ using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Threading;
 using System.Windows;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
@@ -15,6 +16,68 @@ using Microsoft.Data.Sqlite;
 using Microsoft.Win32;
 
 namespace LiteList;
+
+public static class AppLogger
+{
+    private static readonly object Sync = new();
+    private static string? _logPath;
+
+    public static string LogFilePath
+    {
+        get
+        {
+            if (_logPath != null) return _logPath;
+            var baseDir = AppDomain.CurrentDomain.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            var primary = Path.Combine(baseDir, "litelist.log");
+            try
+            {
+                File.AppendAllText(primary, "", new UTF8Encoding(false));
+                _logPath = primary;
+            }
+            catch
+            {
+                var tempDir = Path.Combine(Path.GetTempPath(), "LiteList");
+                Directory.CreateDirectory(tempDir);
+                _logPath = Path.Combine(tempDir, "litelist.log");
+            }
+            return _logPath;
+        }
+    }
+
+    public static void Info(string message) => Write("INFO", message, null);
+
+    public static void Error(string context, Exception? ex = null) => Write("ERROR", context, ex);
+
+    private static void Write(string level, string message, Exception? ex)
+    {
+        try
+        {
+            lock (Sync)
+            {
+                var path = LogFilePath;
+                if (File.Exists(path) && new FileInfo(path).Length > 2 * 1024 * 1024)
+                {
+                    var bak = path + ".bak";
+                    if (File.Exists(bak)) File.Delete(bak);
+                    File.Move(path, bak);
+                }
+
+                var sb = new StringBuilder();
+                sb.Append('[').Append(DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff"))
+                  .Append("] [").Append(level).Append("] [T").Append(Thread.CurrentThread.ManagedThreadId)
+                  .Append("] ").AppendLine(message);
+
+                if (ex != null)
+                {
+                    sb.AppendLine(ex.ToString());
+                }
+
+                File.AppendAllText(path, sb.ToString(), new UTF8Encoding(false));
+            }
+        }
+        catch { }
+    }
+}
 
 public enum SaveMode
 {
@@ -126,9 +189,6 @@ public sealed class TreeNodeVM : INotifyPropertyChanged
         set { if (_title != value) { _title = value; OnPropertyChanged(); } }
     }
 
-    /// <summary>
-    /// 专用重命名缓冲字段：输入期间不直接污染 Title，按 Esc 可完整回滚
-    /// </summary>
     public string EditingTitle
     {
         get => _editingTitle;
@@ -212,7 +272,6 @@ public static class ThemeHelper
             SetBrush(resources, "ItalicColor", "#C084FC");
             SetBrush(resources, "InlineCodeColor", "#F472B6");
 
-            // 覆盖 WPF 系统默认失焦选中浅灰背景，彻底解决深色模式下失焦白字看不清的问题
             resources[SystemColors.HighlightBrushKey] = resources["ActiveBg"];
             resources[SystemColors.HighlightTextBrushKey] = resources["TextFg"];
             resources[SystemColors.InactiveSelectionHighlightBrushKey] = resources["HoverBg"];
@@ -281,17 +340,13 @@ public static class ThemeHelper
         System.Drawing.ColorTranslator.FromHtml(hex);
 }
 
-/// <summary>
-/// 图片与附件统一管理：优先锚定到当前 .llist 数据库所在目录的 files/，
-/// 保障多库隔离与单库随身迁移；并兼容历史软件根目录 files/ 回退读取。
-/// </summary>
 public sealed class FileArchiveService
 {
     public const string FilesFolderName = "files";
 
-    // 支持链接路径中包含单层成对括号，例如 files/report(1).png
+    // 无嵌套回溯，保证任意超长文档绝对 O(N) 线性匹配
     private static readonly Regex MdLinkRegex = new(
-        @"(!?\[[^\]]*\])\((<[^>\r\n]+>|(?:[^()\r\n]|\([^()\r\n]*\))+)\)",
+        @"(!?\[[^\]]*\])\(([^)\r\n]+)\)",
         RegexOptions.Compiled);
 
     private static readonly Regex HtmlImgRegex = new(
@@ -322,10 +377,8 @@ public sealed class FileArchiveService
         catch { return text; }
     }
 
-    public static bool IsLocalFilesReference(string? rawUrl)
-    {
-        return TryNormalizeRelFilePath(rawUrl, out _);
-    }
+    public static bool IsLocalFilesReference(string? rawUrl) =>
+        TryNormalizeRelFilePath(rawUrl, out _);
 
     public static bool TryNormalizeRelFilePath(string? rawUrl, out string normalizedRel)
     {
@@ -622,7 +675,7 @@ public sealed class FileArchiveService
                     deleted++;
                 }
             }
-            catch { }
+            catch (Exception ex) { AppLogger.Error($"DeleteOrphanFiles: {p}", ex); }
         }
         return deleted;
     }
@@ -671,6 +724,7 @@ public sealed class DatabaseService : IDisposable
         _conn = newConn;
         CurrentDbPath = fullPath;
         HasModificationsSinceOpen = false;
+        AppLogger.Info($"Database opened: {fullPath}");
     }
 
     private static void InitAndMigrate(SqliteConnection conn, bool isNew)
@@ -1178,7 +1232,6 @@ public sealed class DatabaseService : IDisposable
             }
         }
 
-        // 优先检索内存中尚未保存的当前节点，避免未保存改动导致跳转行号错位
         if (overrideNodeId.HasValue && overrideNodeId.Value > 0 && overrideTitle != null && overrideContent != null)
         {
             if (overrideTitle.IndexOf(kw, StringComparison.OrdinalIgnoreCase) >= 0 ||
@@ -1288,7 +1341,6 @@ public sealed class DatabaseService : IDisposable
 
             var lines = SplitLinesNormalized(normalized);
             int startIdx = 0;
-            // 若正文首行本身就是与节点同名的 H1 标题，导出时自动去重
             while (startIdx < lines.Length && string.IsNullOrWhiteSpace(lines[startIdx])) startIdx++;
             if (startIdx < lines.Length)
             {
@@ -1376,7 +1428,6 @@ public sealed class DatabaseService : IDisposable
             double ratio = (double)freePages / pageCount;
             if (autoVacuumMode == 2 && (freePages >= 32 || ratio >= 0.10))
             {
-                // 增量清理空闲页，避免在主线程阻塞重写整库
                 ExecNonQuery(_conn, "PRAGMA incremental_vacuum;");
             }
             else if (ratio >= 0.25 && freePages >= 128)
@@ -1384,7 +1435,7 @@ public sealed class DatabaseService : IDisposable
                 ExecNonQuery(_conn, "VACUUM;");
             }
         }
-        catch { }
+        catch (Exception ex) { AppLogger.Error(nameof(SmartVacuumIfNeeded), ex); }
     }
 
     public void Dispose()
