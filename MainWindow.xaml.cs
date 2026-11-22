@@ -5,6 +5,7 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Controls;
@@ -25,7 +26,7 @@ public sealed class PreviewBlockPresenter : Border
         nameof(Block), typeof(PreviewBlockVM), typeof(PreviewBlockPresenter),
         new PropertyMetadata(null, OnBlockChanged));
 
-    internal static Func<PreviewBlockVM, UIElement>? ActiveBuilder;
+    private PreviewBlockVM? _subscribedVm;
 
     public PreviewBlockVM? Block
     {
@@ -36,18 +37,79 @@ public sealed class PreviewBlockPresenter : Border
     public PreviewBlockPresenter()
     {
         MinHeight = 20;
-        Loaded += (_, _) => Rebuild();
-        Unloaded += (_, _) => Child = null;
+        Loaded += (_, _) =>
+        {
+            AttachVm(Block);
+            Rebuild();
+        };
+        Unloaded += (_, _) =>
+        {
+            DetachVm();
+            Child = null;
+        };
     }
 
     private static void OnBlockChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
     {
-        if (d is PreviewBlockPresenter p && p.IsLoaded) p.Rebuild();
+        if (d is PreviewBlockPresenter p)
+        {
+            p.AttachVm(e.NewValue as PreviewBlockVM);
+            if (p.IsLoaded) p.Rebuild();
+        }
+    }
+
+    private void AttachVm(PreviewBlockVM? vm)
+    {
+        if (ReferenceEquals(_subscribedVm, vm)) return;
+        DetachVm();
+        _subscribedVm = vm;
+        if (_subscribedVm != null)
+            _subscribedVm.PropertyChanged += Vm_PropertyChanged;
+        ApplyActiveBorderState();
+    }
+
+    private void DetachVm()
+    {
+        if (_subscribedVm != null)
+        {
+            _subscribedVm.PropertyChanged -= Vm_PropertyChanged;
+            _subscribedVm = null;
+        }
+    }
+
+    private void Vm_PropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(PreviewBlockVM.IsSearchActive))
+            ApplyActiveBorderState();
+    }
+
+    private void ApplyActiveBorderState()
+    {
+        if (_subscribedVm?.IsSearchActive == true)
+        {
+            BorderBrush = ThemeHelper.GetBrush("AccentBrush");
+            BorderThickness = new Thickness(3, 0, 0, 0);
+            Padding = new Thickness(8, 2, 4, 2);
+            Background = ThemeHelper.GetBrush("ActiveBg");
+            CornerRadius = new CornerRadius(3);
+        }
+        else
+        {
+            BorderBrush = Brushes.Transparent;
+            BorderThickness = new Thickness(0);
+            Padding = new Thickness(0);
+            Background = Brushes.Transparent;
+            CornerRadius = new CornerRadius(0);
+        }
     }
 
     public void Rebuild()
     {
-        Child = (Block != null && ActiveBuilder != null) ? ActiveBuilder(Block) : null;
+        ApplyActiveBorderState();
+        if (Block != null && Window.GetWindow(this) is MainWindow mw)
+            Child = mw.BuildPreviewBlockElement(Block);
+        else
+            Child = null;
     }
 }
 
@@ -78,15 +140,18 @@ public partial class MainWindow : Window
     private readonly VirtualizedMarkdownPreview _previewEngine;
 
     private readonly DispatcherTimer _idleSaveTimer;
+    private readonly DispatcherTimer _foldAndTocTimer;
+    private readonly string? _initialDbPath;
 
     private AppSettings _settings = new();
+    private EditorViewMode _preferredViewMode = EditorViewMode.Preview;
     private EditorViewMode _viewMode = EditorViewMode.Preview;
     private readonly Dictionary<long, TreeNodeVM> _nodeLookup = new();
     public ObservableCollection<TreeNodeVM> RootNodes { get; } = new();
 
     private long _selectedNodeId;
     private string _currentContent = "";      // 纯内存权威正文（惰性加载到 Scintilla）
-    private bool _editorTextLoaded;           // 标记当前节点正文是否已注入 Scintilla
+    private bool _editorTextLoaded;
     private int _cachedLineDigits = 2;
     private bool _isDirty;
     private bool _suppressEditorEvents;
@@ -95,6 +160,7 @@ public partial class MainWindow : Window
 
     private readonly List<(int Start, int Length)> _localFindMatches = new();
     private int _localFindIndex = -1;
+    private bool _localFindCacheStale;
 
     private List<SearchHit> _globalHits = new();
     private int _globalHitIndex = -1;
@@ -103,16 +169,15 @@ public partial class MainWindow : Window
 
     private Point _dragStartPoint;
     private TreeNodeVM? _draggingNode;
+    private TreeNodeVM? _contextTargetNode;
 
     public MainWindow(string? initialDbPath)
     {
+        _initialDbPath = initialDbPath;
         InitializeComponent();
         OutlineTree.ItemsSource = RootNodes;
 
         _previewEngine = new VirtualizedMarkdownPreview(_files);
-        PreviewBlockPresenter.ActiveBuilder = vm =>
-            _previewEngine.BuildBlockElement(vm, _settings.FontSize,
-                GlobalSearchPanel.Visibility == Visibility.Visible ? _activeGlobalKeyword : null);
         PreviewList.ItemsSource = _previewEngine.VisibleBlocks;
 
         _previewEngine.HeadingFoldToggled += _ => _previewEngine.RebuildVisibleBlocks();
@@ -132,8 +197,68 @@ public partial class MainWindow : Window
             if (_settings.SaveMode == SaveMode.IdleAutoSave && _isDirty) SaveCurrentNode();
         };
 
-        var targetDb = initialDbPath ?? _db.ResolveDefaultDbPath(_files.AppBaseDir);
-        OpenDatabase(targetDb);
+        _foldAndTocTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(450) };
+        _foldAndTocTimer.Tick += (_, _) =>
+        {
+            _foldAndTocTimer.Stop();
+            if (_selectedNodeId <= 0 || _viewMode != EditorViewMode.Edit || !_editorTextLoaded) return;
+            _scintilla.RebuildFoldLevelsFromText(_scintilla.Text);
+            if (_settings.ShowRightToc) RefreshRightTocTree();
+        };
+
+        SystemEvents.UserPreferenceChanged += SystemEvents_UserPreferenceChanged;
+        Loaded += MainWindow_Loaded;
+    }
+
+    internal UIElement BuildPreviewBlockElement(PreviewBlockVM vm)
+    {
+        return _previewEngine.BuildBlockElement(
+            vm,
+            _settings.FontSize,
+            GlobalSearchPanel.Visibility == Visibility.Visible ? _activeGlobalKeyword : null);
+    }
+
+    private void MainWindow_Loaded(object sender, RoutedEventArgs e)
+    {
+        Loaded -= MainWindow_Loaded;
+        var targetDb = _initialDbPath ?? _db.ResolveDefaultDbPath(_files.AppBaseDir);
+        try
+        {
+            OpenDatabase(targetDb);
+        }
+        catch (Exception ex)
+        {
+            ShowModalMessage($"无法打开笔记库「{targetDb}」：{ex.Message}\n\n将为你创建或选择其他笔记库。",
+                "打开笔记库失败", MessageBoxButton.OK, MessageBoxImage.Warning);
+            var fallback = _db.ResolveDefaultDbPath(_files.AppBaseDir);
+            if (!string.Equals(fallback, targetDb, StringComparison.OrdinalIgnoreCase))
+            {
+                try { OpenDatabase(fallback); return; } catch { }
+            }
+            BtnOpenDb_Click(this, new RoutedEventArgs());
+        }
+    }
+
+    private void SystemEvents_UserPreferenceChanged(object? sender, UserPreferenceChangedEventArgs e)
+    {
+        if (e.Category != UserPreferenceCategory.General) return;
+        Dispatcher.BeginInvoke(new Action(() =>
+        {
+            if (Application.Current == null) return;
+            if (ThemeHelper.ApplySystemTheme(Application.Current.Resources))
+            {
+                _scintilla.ApplyThemeAndFont(_settings.FontSize);
+                _scintilla.ContextMenuStrip = BuildEditorWinFormsMenu();
+                if (_viewMode == EditorViewMode.Preview) RefreshPreviewFromMemory();
+            }
+        }));
+    }
+
+    private MessageBoxResult ShowModalMessage(string text, string caption, MessageBoxButton buttons, MessageBoxImage icon)
+    {
+        _isModalOpen = true;
+        try { return MessageBox.Show(this, text, caption, buttons, icon); }
+        finally { _isModalOpen = false; }
     }
 
     private void SetupScintillaHost()
@@ -149,6 +274,7 @@ public partial class MainWindow : Window
         };
         _scintilla.PasteIntercepted += Scintilla_PasteIntercepted;
         _scintilla.ShortcutPressed += Scintilla_ShortcutPressed;
+        _scintilla.CtrlMouseWheelZoom += delta => Dispatcher.BeginInvoke(new Action(() => ChangeFontSize(delta)));
         _scintilla.DragEnter += (_, e) =>
         {
             if (e.Data != null && e.Data.GetDataPresent(WF.DataFormats.FileDrop))
@@ -158,11 +284,6 @@ public partial class MainWindow : Window
         {
             if (e.Data != null && e.Data.GetData(WF.DataFormats.FileDrop) is string[] paths)
                 ImportFilesAndInsert(paths);
-        };
-        _scintilla.MouseWheel += (_, e) =>
-        {
-            if ((WF.Control.ModifierKeys & WF.Keys.Control) != 0)
-                Dispatcher.BeginInvoke(new Action(() => ChangeFontSize(e.Delta > 0 ? 1 : -1)));
         };
     }
 
@@ -185,7 +306,7 @@ public partial class MainWindow : Window
         menu.Items.Add(new WF.ToolStripSeparator());
         Add("加粗 (Ctrl+B)", () => WrapSel("**", "**", "加粗文本"));
         Add("斜体 (Ctrl+I)", () => WrapSel("*", "*", "斜体文本"));
-        Add("插入代码块", () => InsertSnippet("\r\n```text\r\n\r\n```\r\n"));
+        Add("插入代码块", InsertCodeBlockSnippet);
         Add("插入待办 - [ ]", () => ToggleLinePrefix("- [ ] "));
         Add("插入表格", () => InsertSnippet("\r\n| 列1 | 列2 | 列3 |\r\n| --- | --- | --- |\r\n| 内容 | 内容 | 内容 |\r\n"));
         Add("插入图片 / 附件...", OpenFileAndInsertDialog);
@@ -218,10 +339,38 @@ public partial class MainWindow : Window
         UpdateCursorStatus();
     }
 
-    // ===== 数据库打开、设置应用与树构建 =====
+    // ===== 数据库打开、状态重置与树构建 =====
+
+    private void ResetWorkspaceTransientState()
+    {
+        _idleSaveTimer.Stop();
+        _foldAndTocTimer.Stop();
+        _selectedNodeId = 0;
+        _currentContent = "";
+        _editorTextLoaded = false;
+        _isDirty = false;
+        _contextTargetNode = null;
+
+        GlobalSearchPanel.Visibility = Visibility.Collapsed;
+        _globalHits.Clear();
+        _globalHitIndex = -1;
+        _activeGlobalKeyword = "";
+        LstGlobalHits.ItemsSource = null;
+        TxtGlobalSearch.Text = "";
+        TxtGlobalSearchCount.Text = "请输入关键词";
+
+        FindBar.Visibility = Visibility.Collapsed;
+        _localFindMatches.Clear();
+        _localFindIndex = -1;
+        _localFindCacheStale = false;
+        TxtFindCount.Text = "0/0";
+        _scintilla.ClearSearchHighlights();
+    }
 
     private void OpenDatabase(string dbPath)
     {
+        ResetWorkspaceTransientState();
+
         _db.OpenOrCreate(dbPath);
         _files.CurrentDbDir = Path.GetDirectoryName(_db.CurrentDbPath);
         TxtDbBadge.Text = Path.GetFileName(_db.CurrentDbPath);
@@ -287,24 +436,34 @@ public partial class MainWindow : Window
 
     private void ShowEmptyState()
     {
+        _idleSaveTimer.Stop();
+        _foldAndTocTimer.Stop();
         _selectedNodeId = 0;
         _currentContent = "";
         _editorTextLoaded = false;
-        _isDirty = false;
+        SetDirtyState(false);
+
         EmptyOverlay.Visibility = Visibility.Visible;
         EditorHeaderBar.Visibility = Visibility.Collapsed;
         FormatToolBar.Visibility = Visibility.Collapsed;
+        FindBar.Visibility = Visibility.Collapsed;
         EditorHost.Visibility = Visibility.Collapsed;
         PreviewList.Visibility = Visibility.Collapsed;
         RightTocTree.ItemsSource = null;
+
+        TxtCursorInfo.Text = "行 0, 列 0";
+        TxtDocStats.Text = "0 字 · 0 行";
     }
 
     private void SelectTreeNode(long nodeId)
     {
         if (!_nodeLookup.TryGetValue(nodeId, out var target)) return;
         var cur = target;
-        while (cur.ParentId > 0 && _nodeLookup.TryGetValue(cur.ParentId, out var p))
+        var visited = new HashSet<long> { nodeId };
+        int guard = 0;
+        while (cur.ParentId > 0 && guard++ < 100 && _nodeLookup.TryGetValue(cur.ParentId, out var p))
         {
+            if (!visited.Add(p.Id)) break;
             p.IsExpanded = true;
             cur = p;
         }
@@ -322,17 +481,12 @@ public partial class MainWindow : Window
             if (_settings.BlurAction == BlurAction.AutoSave) { SaveCurrentNode(); return true; }
         }
 
-        _isModalOpen = true;
-        try
-        {
-            var title = _nodeLookup.TryGetValue(_selectedNodeId, out var vm) ? vm.Title : "当前节点";
-            var res = MessageBox.Show(this, $"节点「{title}」有未保存的修改，是否保存？",
-                "未保存提醒", MessageBoxButton.YesNoCancel, MessageBoxImage.Question);
-            if (res == MessageBoxResult.Yes) { SaveCurrentNode(); return true; }
-            if (res == MessageBoxResult.No) { SetDirtyState(false); return true; }
-            return false;
-        }
-        finally { _isModalOpen = false; }
+        var title = _nodeLookup.TryGetValue(_selectedNodeId, out var vm) ? vm.Title : "当前节点";
+        var res = ShowModalMessage($"节点「{title}」有未保存的修改，是否保存？",
+            "未保存提醒", MessageBoxButton.YesNoCancel, MessageBoxImage.Question);
+        if (res == MessageBoxResult.Yes) { SaveCurrentNode(); return true; }
+        if (res == MessageBoxResult.No) { _idleSaveTimer.Stop(); SetDirtyState(false); return true; }
+        return false;
     }
 
     private void OutlineTree_SelectedItemChanged(object sender, RoutedPropertyChangedEventArgs<object> e)
@@ -363,22 +517,23 @@ public partial class MainWindow : Window
         {
             TxtNodeTitle.Text = detail.Title;
             _currentContent = detail.Content;
-            // 惰性加载：先不把几万字注入 Scintilla，直到切换到编辑模式再加载
             _editorTextLoaded = false;
             SetDirtyState(false);
         }
         finally { _suppressEditorEvents = false; }
 
+        int lines = Math.Max(1, DatabaseService.SplitLinesNormalized(_currentContent).Length);
         TxtCursorInfo.Text = "行 1, 列 1";
-        TxtDocStats.Text = $"{_currentContent.Length} 字";
+        TxtDocStats.Text = $"{_currentContent.Length} 字 · {lines} 行";
 
         if (_settings.ShowRightToc) RefreshRightTocTree();
 
         var targetMode = preserveExactMode
             ? _viewMode
-            : (string.IsNullOrWhiteSpace(_currentContent) && _viewMode == EditorViewMode.Preview
-                ? EditorViewMode.Edit : _viewMode);
-        SetEditorViewMode(targetMode, focusEditor: false);
+            : (_preferredViewMode == EditorViewMode.Preview && string.IsNullOrWhiteSpace(_currentContent)
+                ? EditorViewMode.Edit
+                : _preferredViewMode);
+        SetEditorViewMode(targetMode, focusEditor: false, updatePreference: false);
     }
 
     private void SetDirtyState(bool dirty)
@@ -399,10 +554,11 @@ public partial class MainWindow : Window
         SetDirtyState(false);
     }
 
-    // ===== 纯净双视图（编辑 / 预览）与惰性/虚拟化渲染 =====
+    // ===== 双视图切换与虚拟化预览 =====
 
-    private void SetEditorViewMode(EditorViewMode mode, bool focusEditor = false)
+    private void SetEditorViewMode(EditorViewMode mode, bool focusEditor = false, bool updatePreference = true)
     {
+        if (updatePreference) _preferredViewMode = mode;
         if (mode == EditorViewMode.Preview && _editorTextLoaded)
         {
             _currentContent = _scintilla.Text;
@@ -420,11 +576,13 @@ public partial class MainWindow : Window
         if (mode == EditorViewMode.Edit)
         {
             EnsureEditorLoaded();
+            _scintilla.RebuildFoldLevelsFromText(GetCurrentText());
             if (focusEditor && !isOverlayOpen) _scintilla.Focus();
         }
         else
         {
             FindBar.Visibility = Visibility.Collapsed;
+            if (_editorTextLoaded) _scintilla.ClearSearchHighlights();
             RefreshPreviewFromMemory();
         }
     }
@@ -433,18 +591,15 @@ public partial class MainWindow : Window
     {
         if (_selectedNodeId <= 0) return;
         _previewEngine.ParseDocument(GetCurrentText());
-        PreviewList.ItemsSource = null;
-        PreviewList.ItemsSource = _previewEngine.VisibleBlocks;
     }
 
     private void RefreshRightTocTree()
     {
         if (_selectedNodeId <= 0) { RightTocTree.ItemsSource = null; return; }
-        // 纯内存字符串扫描标题，不调用 Scintilla、不重建 AST
         RightTocTree.ItemsSource = MarkdownScintilla.ExtractHeadingTreeFromText(GetCurrentText());
     }
 
-    // ===== 编辑事件（极致低开销，打字绝不扫全文） =====
+    // ===== 编辑事件与低开销防抖刷新 =====
 
     private void TxtNodeTitle_TextChanged(object sender, TextChangedEventArgs e)
     {
@@ -463,6 +618,11 @@ public partial class MainWindow : Window
             _cachedLineDigits = digits;
             _scintilla.UpdateLineNumberMarginWidth();
         }
+        if (FindBar.Visibility == Visibility.Visible)
+            _localFindCacheStale = true;
+
+        _foldAndTocTimer.Stop();
+        _foldAndTocTimer.Start();
         MarkDirty();
     }
 
@@ -483,10 +643,8 @@ public partial class MainWindow : Window
         int line = _scintilla.LineFromPosition(pos) + 1;
         int col = _scintilla.GetColumn(pos) + 1;
         TxtCursorInfo.Text = $"行 {line}, 列 {col}";
-        TxtDocStats.Text = $"{_scintilla.Lines.Count} 行";
+        TxtDocStats.Text = $"{_scintilla.TextLength} 字 · {_scintilla.Lines.Count} 行";
     }
-
-    // ===== 无崩溃异步滚动跳转（预览与编辑双模式安全支持） =====
 
     private void SafeScrollPreviewToBlock(PreviewBlockVM? blk)
     {
@@ -499,10 +657,7 @@ public partial class MainWindow : Window
                 PreviewList.UpdateLayout();
                 PreviewList.ScrollIntoView(blk);
             }
-            catch
-            {
-                // 忽略虚拟化布局竞态异常，绝不崩溃弹窗
-            }
+            catch { }
         }));
     }
 
@@ -538,7 +693,7 @@ public partial class MainWindow : Window
         foreach (var it in items) { it.IsExpanded = expand; SetTocExpandAll(it.Children, expand); }
     }
 
-    // ===== ListPro 风格：Ctrl+K 常驻全局搜索（严格保留当前编辑/预览模式） =====
+    // ===== Ctrl+K 常驻全局搜索 =====
 
     private void OpenGlobalSearch()
     {
@@ -553,6 +708,7 @@ public partial class MainWindow : Window
         GlobalSearchPanel.Visibility = Visibility.Collapsed;
         _activeGlobalKeyword = "";
         if (_editorTextLoaded) _scintilla.ClearSearchHighlights();
+        foreach (var b in _previewEngine.AllBlocks) b.IsSearchActive = false;
         if (_viewMode == EditorViewMode.Preview) RefreshPreviewFromMemory();
     }
 
@@ -596,7 +752,13 @@ public partial class MainWindow : Window
             return;
         }
 
-        _globalHits = _db.SearchOccurrences(kw);
+        _globalHits = _db.SearchOccurrences(
+            kw,
+            maxHits: 500,
+            overrideNodeId: _selectedNodeId > 0 ? _selectedNodeId : null,
+            overrideTitle: _selectedNodeId > 0 ? TxtNodeTitle.Text : null,
+            overrideContent: _selectedNodeId > 0 ? GetCurrentText() : null);
+
         LstGlobalHits.ItemsSource = _globalHits;
         _globalHitIndex = -1;
 
@@ -630,6 +792,7 @@ public partial class MainWindow : Window
 
         if (hit.NodeId != _selectedNodeId)
         {
+            if (!_nodeLookup.ContainsKey(hit.NodeId)) return;
             if (!EnsureSafeToLeaveCurrent()) return;
             _suppressSelectionGuard = true;
             try
@@ -661,51 +824,69 @@ public partial class MainWindow : Window
         else
         {
             foreach (var b in _previewEngine.AllBlocks) b.IsSearchActive = false;
-            var targetBlock = _previewEngine.EnsureLineVisibleAndFindBlock(targetLine);
-            if (targetBlock != null) targetBlock.IsSearchActive = true;
-
-            PreviewList.ItemsSource = null;
-            PreviewList.ItemsSource = _previewEngine.VisibleBlocks;
-            SafeScrollPreviewToBlock(targetBlock);
+            if (hit.LineNumber == 0)
+            {
+                // 命中标题时仅滚动到顶部，不误高亮正文首段
+                if (_previewEngine.VisibleBlocks.Count > 0)
+                    SafeScrollPreviewToBlock(_previewEngine.VisibleBlocks[0]);
+            }
+            else
+            {
+                var targetBlock = _previewEngine.EnsureLineVisibleAndFindBlock(targetLine);
+                if (targetBlock != null) targetBlock.IsSearchActive = true;
+                SafeScrollPreviewToBlock(targetBlock);
+            }
         }
     }
 
-    // ===== 粘贴、拖放图片与附件（自动存至 files/） =====
+    // ===== 粘贴、拖放图片与附件 =====
 
     private void Scintilla_PasteIntercepted(object? sender, HandledEventArgs e)
     {
-        if (Clipboard.ContainsImage())
+        try
         {
-            var img = Clipboard.GetImage();
-            if (img != null)
+            // 若剪贴板同时包含文本和位图（如 Excel 表格或浏览器富文本），优先处理文件与纯文本引用，避免误把表格转截图
+            if (Clipboard.ContainsFileDropList())
             {
+                var list = Clipboard.GetFileDropList();
                 e.Handled = true;
-                var res = _files.SaveClipboardImage(img);
-                InsertSnippet($"![{res.Filename}]({res.RelPath})\r\n");
+                ImportFilesAndInsert(list.Cast<string>());
                 return;
             }
-        }
-        if (Clipboard.ContainsFileDropList())
-        {
-            var list = Clipboard.GetFileDropList();
-            e.Handled = true;
-            ImportFilesAndInsert(list.Cast<string>());
-            return;
-        }
-        if (Clipboard.ContainsText())
-        {
-            var txt = Clipboard.GetText();
-            if (txt.IndexOf("file://", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                Regex.IsMatch(txt, @"[a-zA-Z]:[\\/]"))
+            if (Clipboard.ContainsText())
             {
-                var (rewritten, count) = _files.ResolveLocalReferencesInFragment(txt);
-                if (count > 0)
+                var txt = Clipboard.GetText();
+                if (txt.IndexOf("file://", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    Regex.IsMatch(txt, @"[a-zA-Z]:[\\/]"))
+                {
+                    var (rewritten, count) = _files.ResolveLocalReferencesInFragment(txt);
+                    if (count > 0)
+                    {
+                        e.Handled = true;
+                        InsertSnippet(rewritten);
+                        TxtSaveStatus.Text = $"已自动归档 {count} 个引用至 files/";
+                    }
+                }
+                return;
+            }
+            if (Clipboard.ContainsImage())
+            {
+                var img = Clipboard.GetImage();
+                if (img != null)
                 {
                     e.Handled = true;
-                    InsertSnippet(rewritten);
-                    TxtSaveStatus.Text = $"已自动归档 {count} 个引用至 files/";
+                    var res = _files.SaveClipboardImage(img);
+                    InsertSnippet($"![{res.Filename}]({res.RelPath})\r\n");
                 }
             }
+        }
+        catch (ExternalException)
+        {
+            TxtSaveStatus.Text = "剪贴板读取失败（正被占用）";
+        }
+        catch (Exception ex)
+        {
+            TxtSaveStatus.Text = $"粘贴归档失败: {ex.Message}";
         }
     }
 
@@ -741,71 +922,105 @@ public partial class MainWindow : Window
         _scintilla.Focus();
     }
 
+    private void InsertCodeBlockSnippet()
+    {
+        EnsureEditorLoaded();
+        int start = _scintilla.SelectionStart;
+        const string tpl = "\r\n```text\r\n\r\n```\r\n";
+        _scintilla.ReplaceSelection(tpl);
+        int insideLinePos = start + "\r\n```text\r\n".Length;
+        _scintilla.GotoPosition(insideLinePos);
+        _scintilla.Focus();
+    }
+
     private void PreviewEngine_TaskCheckboxToggled(int lineNum, bool isChecked)
     {
-        var lines = _currentContent.Replace("\r\n", "\n").Split('\n');
+        string newline = _currentContent.IndexOf("\r\n", StringComparison.Ordinal) >= 0 ? "\r\n" : "\n";
+        var lines = DatabaseService.SplitLinesNormalized(_currentContent);
         int idx = lineNum - 1;
         if (idx < 0 || idx >= lines.Length) return;
 
-        lines[idx] = isChecked
-            ? Regex.Replace(lines[idx], @"\[ \]", "[x]")
-            : Regex.Replace(lines[idx], @"\[[xX]\]", "[ ]");
-        _currentContent = string.Join("\n", lines);
+        var rx = new Regex(@"^(\s*(?:[-*+]|\d+\.)\s+)\[[ xX]\]");
+        var updatedLine = rx.Replace(lines[idx], isChecked ? "$1[x]" : "$1[ ]", 1);
+        lines[idx] = updatedLine;
+        _currentContent = string.Join(newline, lines);
 
         if (_editorTextLoaded)
         {
             _suppressEditorEvents = true;
-            try { _scintilla.Text = _currentContent; }
+            try { _scintilla.ReplaceLinePreservingUndo(lineNum, updatedLine); }
             finally { _suppressEditorEvents = false; }
         }
         MarkDirty();
-        RefreshPreviewFromMemory();
     }
 
     private void ShowImageLightbox(string fullPath)
     {
-        var bmp = new BitmapImage();
-        using (var fs = new FileStream(fullPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+        try
         {
-            bmp.BeginInit();
-            bmp.CacheOption = BitmapCacheOption.OnLoad;
-            bmp.StreamSource = fs;
-            bmp.EndInit();
+            var bmp = new BitmapImage();
+            using (var fs = new FileStream(fullPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+            {
+                bmp.BeginInit();
+                bmp.CacheOption = BitmapCacheOption.OnLoad;
+                bmp.StreamSource = fs;
+                bmp.EndInit();
+            }
+            bmp.Freeze();
+            LightboxImg.Source = bmp;
+            EditorHost.Visibility = Visibility.Collapsed;
+            LightboxOverlay.Visibility = Visibility.Visible;
         }
-        bmp.Freeze();
-        LightboxImg.Source = bmp;
-        EditorHost.Visibility = Visibility.Collapsed;
-        LightboxOverlay.Visibility = Visibility.Visible;
+        catch (Exception ex)
+        {
+            ShowModalMessage($"无法加载大图：{ex.Message}", "图片预览", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
     }
 
-    private void LightboxOverlay_Click(object sender, MouseButtonEventArgs e)
+    private void LightboxOverlay_Click(object? sender, MouseButtonEventArgs? e)
     {
         LightboxOverlay.Visibility = Visibility.Collapsed;
+        LightboxImg.Source = null;
         if (_viewMode == EditorViewMode.Edit) EditorHost.Visibility = Visibility.Visible;
     }
 
     private void OpenAttachmentFile(string relPath)
     {
         var full = _files.ResolveExistingFile(relPath);
-        if (full == null) { MessageBox.Show($"在 files 目录中找不到文件：{relPath}"); return; }
-        Process.Start(new ProcessStartInfo(full) { UseShellExecute = true });
+        if (full == null)
+        {
+            ShowModalMessage($"在 files 目录中找不到文件：{relPath}", "找不到附件", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+        try { Process.Start(new ProcessStartInfo(full) { UseShellExecute = true }); }
+        catch (Exception ex) { ShowModalMessage($"无法打开附件：{ex.Message}", "打开失败", MessageBoxButton.OK, MessageBoxImage.Warning); }
     }
 
     private void SaveAttachmentAsFile(string relPath)
     {
         var full = _files.ResolveExistingFile(relPath);
-        if (full == null) { MessageBox.Show($"在 files 目录中找不到文件：{relPath}"); return; }
+        if (full == null)
+        {
+            ShowModalMessage($"在 files 目录中找不到文件：{relPath}", "找不到附件", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
         _isModalOpen = true;
-        var dlg = new SaveFileDialog { FileName = Path.GetFileName(full), Title = "附件另存为" };
-        if (dlg.ShowDialog(this) == true) File.Copy(full, dlg.FileName, overwrite: true);
-        _isModalOpen = false;
+        try
+        {
+            var dlg = new SaveFileDialog { FileName = Path.GetFileName(full), Title = "附件另存为" };
+            if (dlg.ShowDialog(this) == true) File.Copy(full, dlg.FileName, overwrite: true);
+        }
+        finally { _isModalOpen = false; }
     }
 
     private void OpenExternalUrl(string url)
     {
         if (url.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
             url.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
-            Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+        {
+            try { Process.Start(new ProcessStartInfo(url) { UseShellExecute = true }); }
+            catch (Exception ex) { ShowModalMessage($"无法打开链接：{ex.Message}", "打开失败", MessageBoxButton.OK, MessageBoxImage.Warning); }
+        }
     }
 
     // ===== 节点内查找与替换 =====
@@ -822,10 +1037,19 @@ public partial class MainWindow : Window
         else { TxtFind.Focus(); TxtFind.SelectAll(); }
     }
 
+    private Regex? BuildLocalFindRegex()
+    {
+        var pattern = TxtFind.Text;
+        if (string.IsNullOrEmpty(pattern)) return null;
+        var opts = ChkCase.IsChecked == true ? RegexOptions.None : RegexOptions.IgnoreCase;
+        return new Regex(ChkRegex.IsChecked == true ? pattern : Regex.Escape(pattern), opts);
+    }
+
     private void UpdateLocalFindMatches(bool jumpFirst)
     {
         _localFindMatches.Clear();
         _localFindIndex = -1;
+        _localFindCacheStale = false;
         _scintilla.ClearSearchHighlights();
 
         var pattern = TxtFind.Text;
@@ -833,18 +1057,17 @@ public partial class MainWindow : Window
 
         try
         {
-            var opts = ChkCase.IsChecked == true ? RegexOptions.None : RegexOptions.IgnoreCase;
-            var rx = new Regex(ChkRegex.IsChecked == true ? pattern : Regex.Escape(pattern), opts);
+            var rx = BuildLocalFindRegex()!;
             foreach (Match m in rx.Matches(_scintilla.Text))
             {
                 if (m.Length > 0) _localFindMatches.Add((m.Index, m.Length));
-                if (_localFindMatches.Count >= 500) break;
+                if (_localFindMatches.Count >= 5000) break;
             }
         }
         catch { TxtFindCount.Text = "正则错"; return; }
 
         _scintilla.IndicatorCurrent = 0;
-        int drawLimit = Math.Min(120, _localFindMatches.Count);
+        int drawLimit = Math.Min(600, _localFindMatches.Count);
         for (int i = 0; i < drawLimit; i++)
             _scintilla.IndicatorFillRange(_localFindMatches[i].Start, _localFindMatches[i].Length);
 
@@ -853,19 +1076,28 @@ public partial class MainWindow : Window
             _localFindIndex = 0;
             if (jumpFirst) JumpLocalMatch(0);
         }
-        TxtFindCount.Text = _localFindMatches.Count == 0 ? "0/0" : $"{_localFindIndex + 1}/{_localFindMatches.Count}";
+        string capHint = _localFindMatches.Count >= 5000 ? "+" : "";
+        TxtFindCount.Text = _localFindMatches.Count == 0 ? "0/0" : $"{_localFindIndex + 1}/{_localFindMatches.Count}{capHint}";
     }
 
     private void JumpLocalMatch(int index)
     {
+        if (_localFindCacheStale) UpdateLocalFindMatches(jumpFirst: false);
         if (_localFindMatches.Count == 0) return;
+
         _localFindIndex = (index + _localFindMatches.Count) % _localFindMatches.Count;
         var (start, len) = _localFindMatches[_localFindIndex];
         int lineIdx = _scintilla.LineFromPosition(start);
         _scintilla.Lines[lineIdx].EnsureVisible();
         _scintilla.FirstVisibleLine = Math.Max(0, lineIdx - Math.Max(1, _scintilla.LinesOnScreen / 2));
+
+        _scintilla.IndicatorCurrent = 1;
+        _scintilla.IndicatorClearRange(0, _scintilla.TextLength);
+        _scintilla.IndicatorFillRange(start, len);
         _scintilla.SetSelection(start + len, start);
-        TxtFindCount.Text = $"{_localFindIndex + 1}/{_localFindMatches.Count}";
+
+        string capHint = _localFindMatches.Count >= 5000 ? "+" : "";
+        TxtFindCount.Text = $"{_localFindIndex + 1}/{_localFindMatches.Count}{capHint}";
     }
 
     private void TxtFind_TextChanged(object sender, TextChangedEventArgs e) => UpdateLocalFindMatches(jumpFirst: true);
@@ -885,27 +1117,66 @@ public partial class MainWindow : Window
     }
     private void BtnReplaceOne_Click(object sender, RoutedEventArgs e)
     {
+        if (_localFindCacheStale) UpdateLocalFindMatches(jumpFirst: false);
         if (_localFindMatches.Count == 0 || _localFindIndex < 0) return;
+
         var (s, len) = _localFindMatches[_localFindIndex];
+        string replacement = TxtReplace.Text;
+        if (ChkRegex.IsChecked == true)
+        {
+            try
+            {
+                var rx = BuildLocalFindRegex();
+                if (rx != null)
+                {
+                    var m = rx.Match(_scintilla.Text, s);
+                    if (m.Success && m.Index == s && m.Length == len)
+                        replacement = m.Result(TxtReplace.Text);
+                }
+            }
+            catch { return; }
+        }
+
         _scintilla.SetSelection(s + len, s);
-        _scintilla.ReplaceSelection(TxtReplace.Text);
+        _scintilla.ReplaceSelection(replacement);
         UpdateLocalFindMatches(jumpFirst: true);
     }
     private void BtnReplaceAll_Click(object sender, RoutedEventArgs e)
     {
+        if (_localFindCacheStale) UpdateLocalFindMatches(jumpFirst: false);
         if (_localFindMatches.Count == 0) return;
-        _scintilla.BeginUndoAction();
-        for (int i = _localFindMatches.Count - 1; i >= 0; i--)
+
+        Regex? rx = null;
+        if (ChkRegex.IsChecked == true)
         {
-            var (s, len) = _localFindMatches[i];
-            _scintilla.SetSelection(s + len, s);
-            _scintilla.ReplaceSelection(TxtReplace.Text);
+            try { rx = BuildLocalFindRegex(); }
+            catch { return; }
         }
-        _scintilla.EndUndoAction();
+
+        _scintilla.BeginUndoAction();
+        try
+        {
+            for (int i = _localFindMatches.Count - 1; i >= 0; i--)
+            {
+                var (s, len) = _localFindMatches[i];
+                string rep = TxtReplace.Text;
+                if (rx != null)
+                {
+                    var m = rx.Match(_scintilla.Text, s);
+                    if (m.Success && m.Index == s && m.Length == len)
+                        rep = m.Result(TxtReplace.Text);
+                }
+                _scintilla.SetSelection(s + len, s);
+                _scintilla.ReplaceSelection(rep);
+            }
+        }
+        finally { _scintilla.EndUndoAction(); }
         UpdateLocalFindMatches(jumpFirst: false);
     }
 
-    // ===== 树操作与拖拽 =====
+    // ===== 树操作与原地增删移（保留滚动位置，不误标脏） =====
+
+    private TreeNodeVM? GetContextTargetNode() => _contextTargetNode ?? (OutlineTree.SelectedItem as TreeNodeVM);
 
     private void OutlineTree_PreviewKeyDown(object sender, KeyEventArgs e)
     {
@@ -916,9 +1187,9 @@ public partial class MainWindow : Window
             if ((Keyboard.Modifiers & (ModifierKeys.Shift | ModifierKeys.Control)) != 0) CreateChildAndRename(node.Id);
             else CreateSiblingAfterAndRename(node);
         }
-        else if (e.Key == Key.F2) { e.Handled = true; node.IsRenaming = true; }
+        else if (e.Key == Key.F2) { e.Handled = true; node.BeginRename(); }
         else if (e.Key == Key.Delete) { e.Handled = true; DeleteNodeWithConfirm(node); }
-        else if (e.Key == Key.Tab)
+        else if (e.Key == Key.Tab && (Keyboard.Modifiers & ModifierKeys.Control) == 0)
         {
             e.Handled = true;
             if ((Keyboard.Modifiers & ModifierKeys.Shift) != 0) OutdentNode(node);
@@ -928,8 +1199,19 @@ public partial class MainWindow : Window
 
     private void TreeViewItem_PreviewMouseRightButtonDown(object sender, MouseButtonEventArgs e)
     {
-        if (sender is TreeViewItem item) { item.Focus(); item.IsSelected = true; }
+        if (sender is TreeViewItem item)
+        {
+            _contextTargetNode = item.DataContext as TreeNodeVM;
+            e.Handled = false;
+        }
     }
+
+    private void OutlineTreeMenu_Opened(object sender, RoutedEventArgs e)
+    {
+        if (_contextTargetNode == null && OutlineTree.SelectedItem is TreeNodeVM sel)
+            _contextTargetNode = sel;
+    }
+
     private void TreeViewItem_ExpandedChanged(object sender, RoutedEventArgs e)
     {
         if (sender is TreeViewItem item && item.DataContext is TreeNodeVM vm) _db.SetNodeExpanded(vm.Id, vm.IsExpanded);
@@ -939,76 +1221,169 @@ public partial class MainWindow : Window
         if (sender is TextBox tb && tb.Visibility == Visibility.Visible)
             Dispatcher.BeginInvoke(new Action(() => { tb.Focus(); tb.SelectAll(); }), DispatcherPriority.Input);
     }
-    private void RenameBox_KeyDown(object sender, KeyEventArgs e)
+    private void RenameBox_PreviewKeyDown(object sender, KeyEventArgs e)
     {
-        if (sender is TextBox tb && tb.DataContext is TreeNodeVM vm && (e.Key == Key.Enter || e.Key == Key.Escape))
+        if (sender is not TextBox tb || tb.DataContext is not TreeNodeVM vm) return;
+        if (e.Key == Key.Enter)
         {
-            vm.IsRenaming = false;
-            _db.RenameNode(vm.Id, vm.Title);
-            if (_selectedNodeId == vm.Id) TxtNodeTitle.Text = vm.Title;
+            CommitTreeNodeRename(vm);
+            e.Handled = true;
+        }
+        else if (e.Key == Key.Escape)
+        {
+            vm.CancelRename();
             e.Handled = true;
         }
     }
     private void RenameBox_LostFocus(object sender, RoutedEventArgs e)
     {
         if (sender is TextBox tb && tb.DataContext is TreeNodeVM vm && vm.IsRenaming)
+            CommitTreeNodeRename(vm);
+    }
+
+    private void CommitTreeNodeRename(TreeNodeVM vm)
+    {
+        string finalTitle = vm.CommitRename();
+        _db.RenameNode(vm.Id, finalTitle);
+        if (_selectedNodeId == vm.Id)
         {
-            vm.IsRenaming = false;
-            _db.RenameNode(vm.Id, vm.Title);
-            if (_selectedNodeId == vm.Id) TxtNodeTitle.Text = vm.Title;
+            _suppressEditorEvents = true;
+            try { TxtNodeTitle.Text = finalTitle; }
+            finally { _suppressEditorEvents = false; }
         }
+    }
+
+    private ObservableCollection<TreeNodeVM> GetSiblingCollection(long parentId) =>
+        parentId > 0 && _nodeLookup.TryGetValue(parentId, out var p) ? p.Children : RootNodes;
+
+    private void InsertVmOrdered(TreeNodeVM vm)
+    {
+        var col = GetSiblingCollection(vm.ParentId);
+        int idx = 0;
+        while (idx < col.Count && col[idx].SortOrder <= vm.SortOrder) idx++;
+        col.Insert(idx, vm);
     }
 
     private void CreateChildAndRename(long parentId)
     {
         if (!EnsureSafeToLeaveCurrent()) return;
         var created = _db.CreateNode(parentId, "新节点");
-        ReloadTree(created.Id);
-        if (_nodeLookup.TryGetValue(created.Id, out var vm)) vm.IsRenaming = true;
+        var vm = new TreeNodeVM
+        {
+            Id = created.Id, ParentId = created.ParentId, Title = created.Title,
+            SortOrder = created.SortOrder, IsExpanded = created.IsExpanded
+        };
+        _nodeLookup[vm.Id] = vm;
+        if (parentId > 0 && _nodeLookup.TryGetValue(parentId, out var parentVm))
+            parentVm.IsExpanded = true;
+
+        InsertVmOrdered(vm);
+        SelectTreeNode(vm.Id);
+        Dispatcher.BeginInvoke(new Action(() => vm.BeginRename()), DispatcherPriority.Loaded);
     }
 
     private void CreateSiblingAfterAndRename(TreeNodeVM target)
     {
         if (!EnsureSafeToLeaveCurrent()) return;
-        var sibs = target.ParentId > 0 && _nodeLookup.TryGetValue(target.ParentId, out var p) ? p.Children : RootNodes;
+        var sibs = GetSiblingCollection(target.ParentId);
         int idx = sibs.IndexOf(target);
         double order = idx >= 0 && idx + 1 < sibs.Count ? (target.SortOrder + sibs[idx + 1].SortOrder) / 2.0 : target.SortOrder + 1000.0;
         var created = _db.CreateNode(target.ParentId, "新节点", order);
-        ReloadTree(created.Id);
-        if (_nodeLookup.TryGetValue(created.Id, out var vm)) vm.IsRenaming = true;
+        var vm = new TreeNodeVM
+        {
+            Id = created.Id, ParentId = created.ParentId, Title = created.Title,
+            SortOrder = created.SortOrder, IsExpanded = created.IsExpanded
+        };
+        _nodeLookup[vm.Id] = vm;
+        InsertVmOrdered(vm);
+        SelectTreeNode(vm.Id);
+        Dispatcher.BeginInvoke(new Action(() => vm.BeginRename()), DispatcherPriority.Loaded);
+    }
+
+    private bool IsSameOrDescendant(long candidateId, long ancestorId)
+    {
+        long cur = candidateId;
+        int guard = 0;
+        while (cur > 0 && guard++ < 100)
+        {
+            if (cur == ancestorId) return true;
+            if (!_nodeLookup.TryGetValue(cur, out var vm)) break;
+            cur = vm.ParentId;
+        }
+        return false;
+    }
+
+    private void RemoveSubtreeFromLookup(TreeNodeVM node)
+    {
+        foreach (var child in node.Children) RemoveSubtreeFromLookup(child);
+        _nodeLookup.Remove(node.Id);
     }
 
     private void DeleteNodeWithConfirm(TreeNodeVM node)
     {
-        _isModalOpen = true;
         var msg = node.Children.Count > 0 ? $"确定删除「{node.Title}」及其全部子节点吗？" : $"确定删除节点「{node.Title}」吗？";
-        bool ok = MessageBox.Show(this, msg, "删除确认", MessageBoxButton.YesNo, MessageBoxImage.Warning) == MessageBoxResult.Yes;
-        _isModalOpen = false;
-        if (!ok) return;
-        SetDirtyState(false);
+        if (ShowModalMessage(msg, "删除确认", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes)
+            return;
+
+        bool affectsCurrent = IsSameOrDescendant(_selectedNodeId, node.Id);
+        long fallbackSelectId = 0;
+        if (affectsCurrent)
+        {
+            var sibs = GetSiblingCollection(node.ParentId);
+            int idx = sibs.IndexOf(node);
+            if (idx + 1 < sibs.Count) fallbackSelectId = sibs[idx + 1].Id;
+            else if (idx > 0) fallbackSelectId = sibs[idx - 1].Id;
+            else fallbackSelectId = node.ParentId;
+            SetDirtyState(false);
+        }
+
         _db.DeleteNode(node.Id);
-        ReloadTree(null);
+        GetSiblingCollection(node.ParentId).Remove(node);
+        RemoveSubtreeFromLookup(node);
+        if (_contextTargetNode?.Id == node.Id) _contextTargetNode = null;
+
+        if (affectsCurrent)
+        {
+            if (fallbackSelectId > 0 && _nodeLookup.ContainsKey(fallbackSelectId))
+                SelectTreeNode(fallbackSelectId);
+            else if (RootNodes.Count > 0)
+                SelectTreeNode(RootNodes[0].Id);
+            else
+                ShowEmptyState();
+        }
+    }
+
+    private void MoveNodeInMemory(TreeNodeVM node, long newParentId, double newSortOrder)
+    {
+        GetSiblingCollection(node.ParentId).Remove(node);
+        node.ParentId = newParentId;
+        node.SortOrder = newSortOrder;
+        if (newParentId > 0 && _nodeLookup.TryGetValue(newParentId, out var np))
+            np.IsExpanded = true;
+        InsertVmOrdered(node);
     }
 
     private void IndentNode(TreeNodeVM node)
     {
-        var sibs = node.ParentId > 0 && _nodeLookup.TryGetValue(node.ParentId, out var p) ? p.Children : RootNodes;
+        var sibs = GetSiblingCollection(node.ParentId);
         int idx = sibs.IndexOf(node);
         if (idx <= 0) return;
         var np = sibs[idx - 1];
         double order = np.Children.Count > 0 ? np.Children[np.Children.Count - 1].SortOrder + 1000.0 : 1000.0;
         _db.MoveNode(node.Id, np.Id, order);
-        ReloadTree(node.Id);
+        MoveNodeInMemory(node, np.Id, order);
+        SelectTreeNode(node.Id);
     }
 
     private void OutdentNode(TreeNodeVM node)
     {
         if (node.ParentId <= 0 || !_nodeLookup.TryGetValue(node.ParentId, out var parent)) return;
-        var gs = parent.ParentId > 0 && _nodeLookup.TryGetValue(parent.ParentId, out var gp) ? gp.Children : RootNodes;
+        var gs = GetSiblingCollection(parent.ParentId);
         int pIdx = gs.IndexOf(parent);
         double order = pIdx + 1 < gs.Count ? (parent.SortOrder + gs[pIdx + 1].SortOrder) / 2.0 : parent.SortOrder + 1000.0;
         _db.MoveNode(node.Id, parent.ParentId, order);
-        ReloadTree(node.Id);
+        MoveNodeInMemory(node, parent.ParentId, order);
+        SelectTreeNode(node.Id);
     }
 
     private void OutlineTree_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
@@ -1038,18 +1413,23 @@ public partial class MainWindow : Window
         var targetItem = FindAncestor<TreeViewItem>(e.OriginalSource as DependencyObject);
         if (targetItem?.DataContext is not TreeNodeVM target || target.Id == src.Id) return;
 
-        double ratio = e.GetPosition(targetItem).Y / Math.Max(1, targetItem.ActualHeight);
+        // 测量节点自身标题头区域高度（避免被已展开的子节点总高度稀释比例）
+        var header = targetItem.Template?.FindName("PART_Header", targetItem) as FrameworkElement;
+        double headerHeight = (header != null && header.ActualHeight > 0) ? header.ActualHeight : 26.0;
+        double relY = header != null ? e.GetPosition(header).Y : e.GetPosition(targetItem).Y;
+        double ratio = Math.Max(0.0, Math.Min(1.0, relY / Math.Max(1.0, headerHeight)));
+
         long newPid = target.ParentId;
         double newOrder;
         if (ratio < 0.25)
         {
-            var sibs = (newPid > 0 && _nodeLookup.TryGetValue(newPid, out var p) ? p.Children : RootNodes).Where(x => x.Id != src.Id).ToList();
+            var sibs = GetSiblingCollection(newPid).Where(x => x.Id != src.Id).ToList();
             int idx = sibs.FindIndex(x => x.Id == target.Id);
             newOrder = ((idx > 0 ? sibs[idx - 1].SortOrder : target.SortOrder - 1000.0) + target.SortOrder) / 2.0;
         }
         else if (ratio > 0.75)
         {
-            var sibs = (newPid > 0 && _nodeLookup.TryGetValue(newPid, out var p) ? p.Children : RootNodes).Where(x => x.Id != src.Id).ToList();
+            var sibs = GetSiblingCollection(newPid).Where(x => x.Id != src.Id).ToList();
             int idx = sibs.FindIndex(x => x.Id == target.Id);
             newOrder = (target.SortOrder + (idx + 1 < sibs.Count ? sibs[idx + 1].SortOrder : target.SortOrder + 1000.0)) / 2.0;
         }
@@ -1058,8 +1438,17 @@ public partial class MainWindow : Window
             newPid = target.Id;
             newOrder = target.Children.Count > 0 ? target.Children[target.Children.Count - 1].SortOrder + 1000.0 : 1000.0;
         }
-        try { _db.MoveNode(src.Id, newPid, newOrder); ReloadTree(src.Id); }
-        catch (Exception ex) { MessageBox.Show(ex.Message); }
+
+        try
+        {
+            _db.MoveNode(src.Id, newPid, newOrder);
+            MoveNodeInMemory(src, newPid, newOrder);
+            if (src.Id == _selectedNodeId) SelectTreeNode(src.Id);
+        }
+        catch (Exception ex)
+        {
+            ShowModalMessage(ex.Message, "移动失败", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
     }
 
     private static T? FindAncestor<T>(DependencyObject? cur) where T : DependencyObject
@@ -1068,7 +1457,7 @@ public partial class MainWindow : Window
         return null;
     }
 
-    // ===== 工具栏、导出、设置浮层与快捷键 =====
+    // ===== 工具栏、导出、设置浮层、孤儿清理与快捷键 =====
 
     private void BtnToggleLeft_Click(object sender, RoutedEventArgs e)
     {
@@ -1088,24 +1477,43 @@ public partial class MainWindow : Window
     {
         if (!EnsureSafeToLeaveCurrent()) return;
         _isModalOpen = true;
-        var dlg = new SaveFileDialog { Filter = "LiteList 笔记库 (*.llist)|*.llist", FileName = "new-notes.llist" };
-        bool ok = dlg.ShowDialog(this) == true;
-        _isModalOpen = false;
-        if (!ok) return;
-        if (File.Exists(dlg.FileName)) File.Delete(dlg.FileName);
-        OpenDatabase(dlg.FileName);
+        string? picked = null;
+        try
+        {
+            var dlg = new SaveFileDialog { Filter = "LiteList 笔记库 (*.llist)|*.llist", FileName = "new-notes.llist" };
+            if (dlg.ShowDialog(this) == true) picked = dlg.FileName;
+        }
+        finally { _isModalOpen = false; }
+        if (string.IsNullOrEmpty(picked)) return;
+
+        try
+        {
+            if (string.Equals(Path.GetFullPath(picked), _db.CurrentDbPath, StringComparison.OrdinalIgnoreCase))
+                _db.Dispose();
+            if (File.Exists(picked)) File.Delete(picked);
+            OpenDatabase(picked!);
+        }
+        catch (Exception ex)
+        {
+            ShowModalMessage($"创建新笔记库失败：{ex.Message}", "新建失败", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
     }
 
     private void BtnOpenDb_Click(object sender, RoutedEventArgs e)
     {
         if (!EnsureSafeToLeaveCurrent()) return;
         _isModalOpen = true;
-        var dlg = new OpenFileDialog { Filter = "LiteList 笔记库 (*.llist)|*.llist|所有文件 (*.*)|*.*" };
-        bool ok = dlg.ShowDialog(this) == true;
-        _isModalOpen = false;
-        if (!ok) return;
-        try { OpenDatabase(dlg.FileName); }
-        catch (Exception ex) { MessageBox.Show(ex.Message, "打开失败"); }
+        string? picked = null;
+        try
+        {
+            var dlg = new OpenFileDialog { Filter = "LiteList 笔记库 (*.llist)|*.llist|所有文件 (*.*)|*.*" };
+            if (dlg.ShowDialog(this) == true) picked = dlg.FileName;
+        }
+        finally { _isModalOpen = false; }
+        if (string.IsNullOrEmpty(picked)) return;
+
+        try { OpenDatabase(picked!); }
+        catch (Exception ex) { ShowModalMessage(ex.Message, "打开失败", MessageBoxButton.OK, MessageBoxImage.Error); }
     }
 
     private void BtnExportMenu_Click(object sender, RoutedEventArgs e)
@@ -1142,6 +1550,10 @@ public partial class MainWindow : Window
     private void MenuExportSingleNode_Click(object sender, RoutedEventArgs e) { if (_selectedNodeId > 0) RunExport(_selectedNodeId, false); }
     private void MenuExportSubtree_Click(object sender, RoutedEventArgs e) { if (_selectedNodeId > 0) RunExport(_selectedNodeId, true); }
     private void MenuExportAll_Click(object sender, RoutedEventArgs e) => RunExport(null, true);
+
+    private void CtxExportSingleNode_Click(object sender, RoutedEventArgs e) { if (GetContextTargetNode() is TreeNodeVM n) RunExport(n.Id, false); }
+    private void CtxExportSubtree_Click(object sender, RoutedEventArgs e) { if (GetContextTargetNode() is TreeNodeVM n) RunExport(n.Id, true); }
+
     private void BtnSave_Click(object sender, RoutedEventArgs e) => SaveCurrentNode();
 
     private void BtnSettings_Click(object sender, RoutedEventArgs e)
@@ -1152,9 +1564,36 @@ public partial class MainWindow : Window
         SldFontSize.Value = _settings.FontSize;
         TxtSettingFontVal.Text = $"{(int)_settings.FontSize} px";
         ChkAutoVacuum.IsChecked = _settings.AutoVacuumOnExit;
+        TxtOrphanInfo.Text = "可扫描并清理 files/ 中未被任何笔记引用的残留文件";
 
         EditorHost.Visibility = Visibility.Collapsed;
         SettingsOverlay.Visibility = Visibility.Visible;
+    }
+
+    private void BtnCleanOrphanFiles_Click(object sender, RoutedEventArgs e)
+    {
+        var contents = _db.GetAllNodeContents();
+        if (_selectedNodeId > 0) contents.Add(GetCurrentText());
+
+        var scan = _files.ScanOrphanFiles(contents);
+        if (scan.FilePaths.Count == 0)
+        {
+            TxtOrphanInfo.Text = $"扫描完成：当前目录 {scan.TargetDir} 下无孤儿附件。";
+            return;
+        }
+
+        double mb = scan.TotalBytes / (1024.0 * 1024.0);
+        string sizeDesc = mb >= 1.0 ? $"{mb:F2} MB" : $"{Math.Max(1, scan.TotalBytes / 1024)} KB";
+        TxtOrphanInfo.Text = $"发现 {scan.FilePaths.Count} 个未引用文件（共 {sizeDesc}）。";
+
+        var ans = ShowModalMessage(
+            $"在 {scan.TargetDir} 中发现 {scan.FilePaths.Count} 个未被任何笔记引用的文件（总计 {sizeDesc}）。\n\n是否永久删除这些孤儿附件？",
+            "清理孤儿附件", MessageBoxButton.YesNo, MessageBoxImage.Question);
+        if (ans == MessageBoxResult.Yes)
+        {
+            int count = _files.DeleteOrphanFiles(scan.FilePaths);
+            TxtOrphanInfo.Text = $"已清理 {count} 个孤儿附件（释放约 {sizeDesc}）。";
+        }
     }
 
     private void SldFontSize_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
@@ -1199,23 +1638,27 @@ public partial class MainWindow : Window
     private void PreviewList_MouseDoubleClick(object sender, MouseButtonEventArgs e) => SetEditorViewMode(EditorViewMode.Edit, true);
 
     private void BtnAddRoot_Click(object sender, RoutedEventArgs e) => CreateChildAndRename(0);
-    private void BtnExpandAllTree_Click(object sender, RoutedEventArgs e) { _db.SetAllExpanded(true); ReloadTree(_selectedNodeId); }
-    private void BtnCollapseAllTree_Click(object sender, RoutedEventArgs e) { _db.SetAllExpanded(false); ReloadTree(_selectedNodeId); }
+    private void BtnExpandAllTree_Click(object sender, RoutedEventArgs e) { _db.SetAllExpanded(true); SetTreeExpandAll(RootNodes, true); }
+    private void BtnCollapseAllTree_Click(object sender, RoutedEventArgs e) { _db.SetAllExpanded(false); SetTreeExpandAll(RootNodes, false); }
+    private static void SetTreeExpandAll(ObservableCollection<TreeNodeVM> nodes, bool expand)
+    {
+        foreach (var n in nodes) { n.IsExpanded = expand; SetTreeExpandAll(n.Children, expand); }
+    }
 
-    private void CtxAddChild_Click(object sender, RoutedEventArgs e) { if (OutlineTree.SelectedItem is TreeNodeVM n) CreateChildAndRename(n.Id); }
-    private void CtxAddSibling_Click(object sender, RoutedEventArgs e) { if (OutlineTree.SelectedItem is TreeNodeVM n) CreateSiblingAfterAndRename(n); }
-    private void CtxRename_Click(object sender, RoutedEventArgs e) { if (OutlineTree.SelectedItem is TreeNodeVM n) n.IsRenaming = true; }
+    private void CtxAddChild_Click(object sender, RoutedEventArgs e) { if (GetContextTargetNode() is TreeNodeVM n) CreateChildAndRename(n.Id); }
+    private void CtxAddSibling_Click(object sender, RoutedEventArgs e) { if (GetContextTargetNode() is TreeNodeVM n) CreateSiblingAfterAndRename(n); }
+    private void CtxRename_Click(object sender, RoutedEventArgs e) { if (GetContextTargetNode() is TreeNodeVM n) n.BeginRename(); }
     private void CtxDuplicate_Click(object sender, RoutedEventArgs e)
     {
-        if (OutlineTree.SelectedItem is TreeNodeVM n && EnsureSafeToLeaveCurrent())
+        if (GetContextTargetNode() is TreeNodeVM n && EnsureSafeToLeaveCurrent())
             ReloadTree(_db.DuplicateNode(n.Id, true).Id);
     }
     private void CtxMoveUp_Click(object sender, RoutedEventArgs e) => StepSibling(true);
     private void CtxMoveDown_Click(object sender, RoutedEventArgs e) => StepSibling(false);
     private void StepSibling(bool up)
     {
-        if (OutlineTree.SelectedItem is not TreeNodeVM n) return;
-        var sibs = n.ParentId > 0 && _nodeLookup.TryGetValue(n.ParentId, out var p) ? p.Children : RootNodes;
+        if (GetContextTargetNode() is not TreeNodeVM n) return;
+        var sibs = GetSiblingCollection(n.ParentId);
         int idx = sibs.IndexOf(n);
         int t = idx + (up ? -1 : 1);
         if (t < 0 || t >= sibs.Count) return;
@@ -1223,13 +1666,26 @@ public partial class MainWindow : Window
             ? ((t > 0 ? sibs[t - 1].SortOrder : sibs[t].SortOrder - 1000.0) + sibs[t].SortOrder) / 2.0
             : (sibs[t].SortOrder + (t + 1 < sibs.Count ? sibs[t + 1].SortOrder : sibs[t].SortOrder + 1000.0)) / 2.0;
         _db.MoveNode(n.Id, n.ParentId, order);
-        ReloadTree(n.Id);
+        MoveNodeInMemory(n, n.ParentId, order);
+        if (n.Id == _selectedNodeId) SelectTreeNode(n.Id);
     }
-    private void CtxSortChildren_Click(object sender, RoutedEventArgs e) { if (OutlineTree.SelectedItem is TreeNodeVM n) { _db.SortChildren(n.Id); ReloadTree(n.Id); } }
-    private void CtxDelete_Click(object sender, RoutedEventArgs e) { if (OutlineTree.SelectedItem is TreeNodeVM n) DeleteNodeWithConfirm(n); }
+    private void CtxSortChildren_Click(object sender, RoutedEventArgs e)
+    {
+        if (GetContextTargetNode() is not TreeNodeVM n) return;
+        _db.SortChildren(n.Id);
+        var sorted = n.Children.OrderBy(x => x.Title, StringComparer.OrdinalIgnoreCase).ThenBy(x => x.Id).ToList();
+        n.Children.Clear();
+        for (int i = 0; i < sorted.Count; i++)
+        {
+            sorted[i].SortOrder = (i + 1) * 1000.0;
+            n.Children.Add(sorted[i]);
+        }
+    }
+    private void CtxDelete_Click(object sender, RoutedEventArgs e) { if (GetContextTargetNode() is TreeNodeVM n) DeleteNodeWithConfirm(n); }
 
     private void WrapSel(string before, string after, string placeholder)
     {
+        EnsureEditorLoaded();
         var sel = _scintilla.SelectedText;
         var inner = string.IsNullOrEmpty(sel) ? placeholder : sel;
         int anchor = _scintilla.SelectionStart;
@@ -1240,6 +1696,7 @@ public partial class MainWindow : Window
 
     private void ToggleLinePrefix(string prefix)
     {
+        EnsureEditorLoaded();
         var line = _scintilla.Lines[_scintilla.CurrentLine];
         var raw = line.Text.TrimEnd('\r', '\n');
         if (raw.StartsWith(prefix, StringComparison.Ordinal)) _scintilla.DeleteRange(line.Position, prefix.Length);
@@ -1251,6 +1708,7 @@ public partial class MainWindow : Window
     private void FmtRedo_Click(object sender, RoutedEventArgs e) => _scintilla.Redo();
     private void FmtHeading_Click(object sender, RoutedEventArgs e)
     {
+        EnsureEditorLoaded();
         var line = _scintilla.Lines[_scintilla.CurrentLine];
         var raw = line.Text.TrimEnd('\r', '\n');
         var m = Regex.Match(raw, @"^(#{1,6})\s+");
@@ -1267,7 +1725,7 @@ public partial class MainWindow : Window
     private void FmtItalic_Click(object sender, RoutedEventArgs e) => WrapSel("*", "*", "斜体文本");
     private void FmtStrike_Click(object sender, RoutedEventArgs e) => WrapSel("~~", "~~", "删除文本");
     private void FmtInlineCode_Click(object sender, RoutedEventArgs e) => WrapSel("`", "`", "code");
-    private void FmtCodeBlock_Click(object sender, RoutedEventArgs e) => InsertSnippet("\r\n```text\r\n\r\n```\r\n");
+    private void FmtCodeBlock_Click(object sender, RoutedEventArgs e) => InsertCodeBlockSnippet();
     private void FmtQuote_Click(object sender, RoutedEventArgs e) => ToggleLinePrefix("> ");
     private void FmtTask_Click(object sender, RoutedEventArgs e) => ToggleLinePrefix("- [ ] ");
     private void FmtLink_Click(object sender, RoutedEventArgs e) => WrapSel("[", "](https://)", "链接文字");
@@ -1277,7 +1735,11 @@ public partial class MainWindow : Window
     private void FmtUnfoldAll_Click(object sender, RoutedEventArgs e) => _scintilla.FoldAll(FoldAction.Expand);
     private void FmtFind_Click(object sender, RoutedEventArgs e) => OpenFindBar(false);
 
-    private void PreviewCopyMd_Click(object sender, RoutedEventArgs e) => Clipboard.SetText(GetCurrentText());
+    private void PreviewCopyMd_Click(object sender, RoutedEventArgs e)
+    {
+        if (VirtualizedMarkdownPreview.TrySetClipboardText(GetCurrentText()))
+            TxtSaveStatus.Text = "已复制节点 Markdown 原文";
+    }
     private void PreviewFoldAll_Click(object sender, RoutedEventArgs e)
     {
         foreach (var b in _previewEngine.AllBlocks) if (b.HeadingLevel > 0) b.IsCollapsed = true;
@@ -1293,6 +1755,8 @@ public partial class MainWindow : Window
     {
         Dispatcher.BeginInvoke(new Action(() =>
         {
+            if (SettingsOverlay.Visibility == Visibility.Visible || LightboxOverlay.Visibility == Visibility.Visible) return;
+
             if (keyData == (WF.Keys.Control | WF.Keys.S)) SaveCurrentNode();
             else if (keyData == (WF.Keys.Control | WF.Keys.K)) OpenGlobalSearch();
             else if (keyData == (WF.Keys.Control | WF.Keys.E)) SetEditorViewMode(EditorViewMode.Preview);
@@ -1303,8 +1767,8 @@ public partial class MainWindow : Window
             else if (keyData == (WF.Keys.Control | WF.Keys.L)) WrapSel("[", "](https://)", "链接文字");
             else if (keyData == (WF.Keys.Control | WF.Keys.Oem5)) BtnToggleLeft_Click(this, new RoutedEventArgs());
             else if (keyData == (WF.Keys.Control | WF.Keys.OemQuestion)) BtnToggleRight_Click(this, new RoutedEventArgs());
-            else if (keyData == (WF.Keys.Control | WF.Keys.Oemplus)) ChangeFontSize(1);
-            else if (keyData == (WF.Keys.Control | WF.Keys.OemMinus)) ChangeFontSize(-1);
+            else if (keyData == (WF.Keys.Control | WF.Keys.Oemplus) || keyData == (WF.Keys.Control | WF.Keys.Add)) ChangeFontSize(1);
+            else if (keyData == (WF.Keys.Control | WF.Keys.OemMinus) || keyData == (WF.Keys.Control | WF.Keys.Subtract)) ChangeFontSize(-1);
             else if (keyData == WF.Keys.F3) HandleF3Step(false);
             else if (keyData == (WF.Keys.Shift | WF.Keys.F3)) HandleF3Step(true);
         }));
@@ -1318,6 +1782,21 @@ public partial class MainWindow : Window
 
     private void Window_PreviewKeyDown(object sender, KeyEventArgs e)
     {
+        // 当设置或灯箱遮罩层处于打开状态时，仅允许 Esc 关闭浮层，严格屏蔽底层快捷键穿透
+        if (LightboxOverlay.Visibility == Visibility.Visible)
+        {
+            if (e.Key == Key.Escape) LightboxOverlay_Click(sender, null);
+            e.Handled = true;
+            return;
+        }
+        if (SettingsOverlay.Visibility == Visibility.Visible)
+        {
+            if (e.Key == Key.Escape) BtnSettingsCancel_Click(sender, e);
+            if (Keyboard.Modifiers == ModifierKeys.Control || e.Key == Key.Escape || e.Key == Key.F3)
+                e.Handled = true;
+            return;
+        }
+
         if (Keyboard.Modifiers == ModifierKeys.Control)
         {
             switch (e.Key)
@@ -1329,6 +1808,12 @@ public partial class MainWindow : Window
                 case Key.H: OpenFindBar(true); e.Handled = true; break;
                 case Key.Oem5: BtnToggleLeft_Click(sender, e); e.Handled = true; break;
                 case Key.OemQuestion: BtnToggleRight_Click(sender, e); e.Handled = true; break;
+                case Key.OemPlus:
+                case Key.Add:
+                    ChangeFontSize(1); e.Handled = true; break;
+                case Key.OemMinus:
+                case Key.Subtract:
+                    ChangeFontSize(-1); e.Handled = true; break;
             }
         }
         else if (e.Key == Key.F3)
@@ -1338,9 +1823,9 @@ public partial class MainWindow : Window
         }
         else if (e.Key == Key.Escape)
         {
-            if (LightboxOverlay.Visibility == Visibility.Visible) { LightboxOverlay_Click(sender, null!); e.Handled = true; }
-            else if (SettingsOverlay.Visibility == Visibility.Visible) { BtnSettingsCancel_Click(sender, e); e.Handled = true; }
-            else if (FindBar.Visibility == Visibility.Visible) { BtnCloseFind_Click(sender, e); e.Handled = true; }
+            // 若当前正在重命名树节点，让 RenameBox 自行处理 Escape 回滚，避免误关搜索面板
+            if (_nodeLookup.Values.Any(x => x.IsRenaming)) return;
+            if (FindBar.Visibility == Visibility.Visible) { BtnCloseFind_Click(sender, e); e.Handled = true; }
             else if (GlobalSearchPanel.Visibility == Visibility.Visible) { BtnCloseGlobalSearch_Click(sender, e); e.Handled = true; }
         }
     }
@@ -1355,6 +1840,9 @@ public partial class MainWindow : Window
     private void Window_Closing(object? sender, CancelEventArgs e)
     {
         if (!EnsureSafeToLeaveCurrent()) { e.Cancel = true; return; }
+        SystemEvents.UserPreferenceChanged -= SystemEvents_UserPreferenceChanged;
+        _idleSaveTimer.Stop();
+        _foldAndTocTimer.Stop();
         if (_settings.AutoVacuumOnExit) _db.SmartVacuumIfNeeded();
         _db.Dispose();
     }
