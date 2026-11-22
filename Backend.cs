@@ -1,7 +1,10 @@
+using System;
+using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -29,8 +32,7 @@ public enum BlurAction
 public enum EditorViewMode
 {
     Edit = 0,
-    Split = 1,
-    Preview = 2
+    Preview = 1
 }
 
 public sealed class AppSettings
@@ -39,7 +41,7 @@ public sealed class AppSettings
     public BlurAction BlurAction { get; set; } = BlurAction.None;
     public double FontSize { get; set; } = 15.0;
     public bool ShowLeftTree { get; set; } = true;
-    public bool ShowRightToc { get; set; } = true;
+    public bool ShowRightToc { get; set; } = false; // 默认隐藏右侧正文大纲
     public bool AutoVacuumOnExit { get; set; } = true;
 }
 
@@ -66,7 +68,9 @@ public sealed class SearchHit
     public long NodeId { get; set; }
     public string NodeTitle { get; set; } = "";
     public string Breadcrumb { get; set; } = "";
-    public int LineNumber { get; set; } // 1-based 行号（0 表示命中标题）
+    public int LineNumber { get; set; }          // 1-based（0 表示命中节点标题）
+    public int CharOffsetInLine { get; set; }
+    public int MatchLength { get; set; }
     public string Snippet { get; set; } = "";
 }
 
@@ -77,12 +81,24 @@ public sealed class AttachmentResult
     public bool IsImage { get; set; }
 }
 
-public sealed class HeadingItem
+public sealed class HeadingNodeVM : INotifyPropertyChanged
 {
+    private bool _isExpanded = true;
     public int Level { get; set; }
     public string Text { get; set; } = "";
     public int LineNumber { get; set; }
-    public string DisplayText => new string('　', Math.Max(0, Level - 1)) + Text;
+
+    public bool IsExpanded
+    {
+        get => _isExpanded;
+        set { if (_isExpanded != value) { _isExpanded = value; OnPropertyChanged(); } }
+    }
+
+    public ObservableCollection<HeadingNodeVM> Children { get; } = new();
+
+    public event PropertyChangedEventHandler? PropertyChanged;
+    private void OnPropertyChanged([CallerMemberName] string? name = null) =>
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
 }
 
 public sealed class TreeNodeVM : INotifyPropertyChanged
@@ -148,16 +164,11 @@ public static class ThemeHelper
             SetBrush(resources, "DangerBrush", "#F87171");
             SetBrush(resources, "CodeBg", "#232329");
             SetBrush(resources, "CaretBrush", "#FFFFFF");
-            SetBrush(resources, "EditorActiveLineBg", "#14FFFFFF");
-            SetBrush(resources, "SelectionBg", "#553B82F6");
             SetBrush(resources, "SearchMatchBg", "#66EAB308");
             SetBrush(resources, "HeadingColor", "#60A5FA");
             SetBrush(resources, "StrongColor", "#FAFAFA");
             SetBrush(resources, "ItalicColor", "#C084FC");
             SetBrush(resources, "InlineCodeColor", "#F472B6");
-            SetBrush(resources, "KeywordColor", "#FF7B72");
-            SetBrush(resources, "StringColor", "#A5D6FF");
-            SetBrush(resources, "CommentColor", "#8B949E");
         }
         else
         {
@@ -173,16 +184,11 @@ public static class ThemeHelper
             SetBrush(resources, "DangerBrush", "#DC2626");
             SetBrush(resources, "CodeBg", "#F3F4F6");
             SetBrush(resources, "CaretBrush", "#111827");
-            SetBrush(resources, "EditorActiveLineBg", "#0A2563EB");
-            SetBrush(resources, "SelectionBg", "#402563EB");
-            SetBrush(resources, "SearchMatchBg", "#66FACC15");
+            SetBrush(resources, "SearchMatchBg", "#80FACC15");
             SetBrush(resources, "HeadingColor", "#1D4ED8");
             SetBrush(resources, "StrongColor", "#111827");
             SetBrush(resources, "ItalicColor", "#7C3AED");
             SetBrush(resources, "InlineCodeColor", "#BE185D");
-            SetBrush(resources, "KeywordColor", "#D73A49");
-            SetBrush(resources, "StringColor", "#032F62");
-            SetBrush(resources, "CommentColor", "#6A737D");
         }
     }
 
@@ -207,10 +213,13 @@ public static class ThemeHelper
 
     public static Brush GetBrush(string key) =>
         Application.Current?.Resources[key] as Brush ?? Brushes.Gray;
+
+    public static System.Drawing.Color ToWinFormsColor(string hex) =>
+        System.Drawing.ColorTranslator.FromHtml(hex);
 }
 
 /// <summary>
-/// 附件与图片统一归档至程序同目录 files/ 文件夹
+/// 图片与附件统一复制到软件所在目录下的 files/ 文件夹
 /// </summary>
 public sealed class FileArchiveService
 {
@@ -219,6 +228,10 @@ public sealed class FileArchiveService
     private static readonly Regex MdLinkRegex = new(
         @"(!?\[[^\]]*\])\(([^)\r\n]+)\)",
         RegexOptions.Compiled);
+
+    private static readonly Regex HtmlImgRegex = new(
+        @"<img[^>]+src=[""']([^""']+)[""']",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     private static readonly HashSet<string> ImageExts = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -230,7 +243,7 @@ public sealed class FileArchiveService
 
     public FileArchiveService()
     {
-        AppBaseDir = AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        AppBaseDir = AppDomain.CurrentDomain.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
     }
 
     public static bool IsImageExtension(string ext) => ImageExts.Contains(ext);
@@ -248,19 +261,23 @@ public sealed class FileArchiveService
     {
         try
         {
-            var probe = Path.Combine(dir, $".ll_probe_{Guid.NewGuid():N}");
-            File.WriteAllBytes(probe, []);
+            var probe = Path.Combine(dir, ".ll_probe_" + Guid.NewGuid().ToString("N"));
+            File.WriteAllBytes(probe, Array.Empty<byte>());
             File.Delete(probe);
             return true;
         }
         catch { return false; }
     }
 
-    public string? ResolveExistingFile(string relPath)
+    public string? ResolveExistingFile(string rawUrl)
     {
-        var clean = relPath.Replace('\\', '/').Trim().TrimStart('/');
+        if (string.IsNullOrWhiteSpace(rawUrl)) return null;
+        var decoded = Uri.UnescapeDataString(rawUrl.Trim().Trim('<', '>'));
+        var clean = decoded.Replace('\\', '/').TrimStart('/');
+        if (clean.StartsWith("./", StringComparison.Ordinal))
+            clean = clean.Substring(2);
         if (clean.StartsWith(FilesFolderName + "/", StringComparison.OrdinalIgnoreCase))
-            clean = clean[(FilesFolderName.Length + 1)..];
+            clean = clean.Substring(FilesFolderName.Length + 1);
         if (string.IsNullOrWhiteSpace(clean) || clean.Contains("..")) return null;
 
         var nativeRel = clean.Replace('/', Path.DirectorySeparatorChar);
@@ -281,11 +298,11 @@ public sealed class FileArchiveService
         if (string.IsNullOrWhiteSpace(baseName)) baseName = "file";
         var invalid = Path.GetInvalidFileNameChars();
         return new string(baseName.Select(c =>
-            invalid.Contains(c) || c is ' ' or '(' or ')' or '[' or ']' ? '_' : c).ToArray());
+            invalid.Contains(c) || c == ' ' || c == '(' || c == ')' || c == '[' || c == ']' ? '_' : c).ToArray());
     }
 
     private static string MakeUniqueStoredName(string safeName) =>
-        $"{DateTime.Now:yyyyMMdd_HHmmss}_{Guid.NewGuid():N}"[..20] + "_" + safeName;
+        $"{DateTime.Now:yyyyMMdd_HHmmss}_{Guid.NewGuid().ToString("N").Substring(0, 4)}_{safeName}";
 
     public AttachmentResult SaveClipboardImage(BitmapSource image)
     {
@@ -322,10 +339,11 @@ public sealed class FileArchiveService
 
         var filesDir = Path.GetFullPath(GetTargetFilesDir());
         Directory.CreateDirectory(filesDir);
+        var filesDirWithSep = filesDir.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
 
-        if (fullSrc.StartsWith(filesDir + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+        if (fullSrc.StartsWith(filesDirWithSep, StringComparison.OrdinalIgnoreCase))
         {
-            var rel = Path.GetRelativePath(filesDir, fullSrc).Replace('\\', '/');
+            var rel = fullSrc.Substring(filesDirWithSep.Length).Replace('\\', '/');
             return new AttachmentResult
             {
                 RelPath = $"{FilesFolderName}/{rel}",
@@ -357,22 +375,30 @@ public sealed class FileArchiveService
             var pathOnly = rawTarget;
             var suffix = "";
 
-            if (rawTarget.StartsWith('<') && rawTarget.IndexOf('>') is int endAngle and > 1)
+            if (rawTarget.StartsWith("<"))
             {
-                pathOnly = rawTarget[1..endAngle];
-                suffix = rawTarget[(endAngle + 1)..];
+                int endAngle = rawTarget.IndexOf('>');
+                if (endAngle > 1)
+                {
+                    pathOnly = rawTarget.Substring(1, endAngle - 1);
+                    suffix = rawTarget.Substring(endAngle + 1);
+                }
             }
-            else if (rawTarget.IndexOf(" \"", StringComparison.Ordinal) is int quoteIdx and > 0)
+            else
             {
-                pathOnly = rawTarget[..quoteIdx];
-                suffix = rawTarget[quoteIdx..];
+                int quoteIdx = rawTarget.IndexOf(" \"", StringComparison.Ordinal);
+                if (quoteIdx > 0)
+                {
+                    pathOnly = rawTarget.Substring(0, quoteIdx);
+                    suffix = rawTarget.Substring(quoteIdx);
+                }
             }
 
             if (string.IsNullOrWhiteSpace(pathOnly) ||
                 pathOnly.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
                 pathOnly.StartsWith("https://", StringComparison.OrdinalIgnoreCase) ||
                 pathOnly.StartsWith("mailto:", StringComparison.OrdinalIgnoreCase) ||
-                pathOnly.StartsWith("#") ||
+                pathOnly.StartsWith("#", StringComparison.Ordinal) ||
                 pathOnly.StartsWith("files/", StringComparison.OrdinalIgnoreCase) ||
                 pathOnly.StartsWith("/files/", StringComparison.OrdinalIgnoreCase))
             {
@@ -381,7 +407,7 @@ public sealed class FileArchiveService
 
             try
             {
-                var res = ImportExternalFile(pathOnly);
+                var res = ImportExternalFile(Uri.UnescapeDataString(pathOnly));
                 count++;
                 return $"{label}({res.RelPath}{suffix})";
             }
@@ -396,10 +422,16 @@ public sealed class FileArchiveService
         if (string.IsNullOrEmpty(markdownContent)) return list;
         foreach (Match m in MdLinkRegex.Matches(markdownContent))
         {
-            var target = m.Groups[2].Value.Trim();
+            var target = Uri.UnescapeDataString(m.Groups[2].Value.Trim());
             var sq = target.IndexOf(" \"", StringComparison.Ordinal);
-            if (sq > 0) target = target[..sq];
+            if (sq > 0) target = target.Substring(0, sq);
             target = target.Trim('<', '>').Replace('\\', '/').TrimStart('/');
+            if (target.StartsWith(FilesFolderName + "/", StringComparison.OrdinalIgnoreCase))
+                list.Add(target);
+        }
+        foreach (Match m in HtmlImgRegex.Matches(markdownContent))
+        {
+            var target = Uri.UnescapeDataString(m.Groups[1].Value.Trim()).Replace('\\', '/').TrimStart('/');
             if (target.StartsWith(FilesFolderName + "/", StringComparison.OrdinalIgnoreCase))
                 list.Add(target);
         }
@@ -417,8 +449,8 @@ public sealed class DatabaseService : IDisposable
     {
         try
         {
-            var probe = Path.Combine(appBaseDir, $".ll_db_{Guid.NewGuid():N}");
-            File.WriteAllBytes(probe, []);
+            var probe = Path.Combine(appBaseDir, ".ll_db_" + Guid.NewGuid().ToString("N"));
+            File.WriteAllBytes(probe, Array.Empty<byte>());
             File.Delete(probe);
             return Path.Combine(appBaseDir, "notes.llist");
         }
@@ -474,7 +506,7 @@ public sealed class DatabaseService : IDisposable
                     throw new InvalidDataException("所选文件不是有效的 LiteList (.llist) 笔记库。");
             }
 
-            ExecNonQuery(conn, """
+            ExecNonQuery(conn, @"
                 PRAGMA auto_vacuum = INCREMENTAL;
                 CREATE TABLE IF NOT EXISTS nodes (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -488,15 +520,14 @@ public sealed class DatabaseService : IDisposable
                 );
                 CREATE INDEX IF NOT EXISTS idx_parent ON nodes(parent_id, sort_order);
                 CREATE TABLE IF NOT EXISTS app_settings (k TEXT PRIMARY KEY, v TEXT NOT NULL);
-                PRAGMA user_version = 2;
-                """);
+                PRAGMA user_version = 2;");
 
             if (isNew)
             {
                 using var ins = conn.CreateCommand();
                 ins.CommandText = "INSERT INTO nodes (parent_id, title, content, sort_order, is_expanded) VALUES (NULL, $t, $c, 1000.0, 1);";
                 ins.Parameters.AddWithValue("$t", "我的第一篇笔记");
-                ins.Parameters.AddWithValue("$c", "# LiteList 极简大纲笔记\n\n## 快速上手\n- 默认为「手动安全模式」：`Ctrl+S` 保存，切换或退出未保存会提示确认\n- 粘贴截图或拖入文件会自动存至同目录 `files/` 文件夹\n- `Ctrl+K` 全局搜精确行，`Ctrl+F` 文内查找替换\n- [ ] 在预览模式下点击复选框试试");
+                ins.Parameters.AddWithValue("$c", "# 我的第一篇笔记\n\n点击「编辑」或按 Ctrl+E 开始编写你的 Markdown 内容。\n\n- 拖入或粘贴图片/附件将自动存入程序目录下的 files/ 文件夹\n- [ ] 待办事项示例");
                 ins.ExecuteNonQuery();
             }
         }
@@ -530,7 +561,7 @@ public sealed class DatabaseService : IDisposable
             {
                 case "save_mode" when int.TryParse(v, out var sm): s.SaveMode = (SaveMode)sm; break;
                 case "blur_action" when int.TryParse(v, out var ba): s.BlurAction = (BlurAction)ba; break;
-                case "font_size" when double.TryParse(v, CultureInfo.InvariantCulture, out var fs): s.FontSize = Math.Clamp(fs, 12, 28); break;
+                case "font_size" when double.TryParse(v, NumberStyles.Float, CultureInfo.InvariantCulture, out var fs): s.FontSize = Math.Clamp(fs, 12, 28); break;
                 case "show_left_tree": s.ShowLeftTree = v != "0"; break;
                 case "show_right_toc": s.ShowRightToc = v != "0"; break;
                 case "auto_vacuum_exit": s.AutoVacuumOnExit = v != "0"; break;
@@ -616,7 +647,7 @@ public sealed class DatabaseService : IDisposable
 
         using var cmd = conn.CreateCommand();
         cmd.CommandText = "INSERT INTO nodes (parent_id, title, content, sort_order, is_expanded) VALUES ($pid, $title, '', $order, 1); SELECT last_insert_rowid();";
-        cmd.Parameters.AddWithValue("$pid", parentId <= 0 ? DBNull.Value : parentId);
+        cmd.Parameters.AddWithValue("$pid", parentId <= 0 ? DBNull.Value : (object)parentId);
         cmd.Parameters.AddWithValue("$title", title);
         cmd.Parameters.AddWithValue("$order", order);
         var newId = Convert.ToInt64(cmd.ExecuteScalar()!);
@@ -697,7 +728,7 @@ public sealed class DatabaseService : IDisposable
         }
         using var cmd = conn.CreateCommand();
         cmd.CommandText = "UPDATE nodes SET parent_id = $np, sort_order = $so, updated_at = CURRENT_TIMESTAMP WHERE id = $id;";
-        cmd.Parameters.AddWithValue("$np", newParentId <= 0 ? DBNull.Value : newParentId);
+        cmd.Parameters.AddWithValue("$np", newParentId <= 0 ? DBNull.Value : (object)newParentId);
         cmd.Parameters.AddWithValue("$so", newSortOrder);
         cmd.Parameters.AddWithValue("$id", id);
         cmd.ExecuteNonQuery();
@@ -738,7 +769,7 @@ public sealed class DatabaseService : IDisposable
             {
                 ins.Transaction = tx;
                 ins.CommandText = "INSERT INTO nodes (parent_id, title, content, sort_order, is_expanded) VALUES ($pid, $t, $c, $so, $exp); SELECT last_insert_rowid();";
-                ins.Parameters.AddWithValue("$pid", targetPid <= 0 ? DBNull.Value : targetPid);
+                ins.Parameters.AddWithValue("$pid", targetPid <= 0 ? DBNull.Value : (object)targetPid);
                 ins.Parameters.AddWithValue("$t", t);
                 ins.Parameters.AddWithValue("$c", c);
                 ins.Parameters.AddWithValue("$so", order);
@@ -820,7 +851,7 @@ public sealed class DatabaseService : IDisposable
             while (r.Read())
             {
                 var it = (r.GetInt64(0), r.GetDouble(1));
-                if (items.Count > 0 && (it.Item2 - items[^1].Order) < 0.001) need = true;
+                if (items.Count > 0 && (it.Item2 - items[items.Count - 1].Order) < 0.001) need = true;
                 items.Add(it);
             }
         }
@@ -838,7 +869,7 @@ public sealed class DatabaseService : IDisposable
         tx.Commit();
     }
 
-    public List<SearchHit> SearchOccurrences(string keyword, int maxHits = 120)
+    public List<SearchHit> SearchOccurrences(string keyword, int maxHits = 500)
     {
         var conn = RequireConn();
         var kw = keyword.Trim();
@@ -849,7 +880,7 @@ public sealed class DatabaseService : IDisposable
         string BuildPath(long id)
         {
             var parts = new List<string>();
-            var cur = map.GetValueOrDefault(id);
+            if (!map.TryGetValue(id, out var cur)) return "";
             int guard = 0;
             while (cur != null && cur.ParentId > 0 && guard++ < 50 && map.TryGetValue(cur.ParentId, out var p))
             {
@@ -861,7 +892,7 @@ public sealed class DatabaseService : IDisposable
 
         var escaped = kw.Replace(@"\", @"\\").Replace("%", @"\%").Replace("_", @"\_");
         using var cmd = conn.CreateCommand();
-        cmd.CommandText = "SELECT id, title, content FROM nodes WHERE title LIKE $pat ESCAPE '\\' OR content LIKE $pat ESCAPE '\\' ORDER BY updated_at DESC;";
+        cmd.CommandText = "SELECT id, title, content FROM nodes WHERE title LIKE $pat ESCAPE '\\' OR content LIKE $pat ESCAPE '\\' ORDER BY sort_order ASC, id ASC;";
         cmd.Parameters.AddWithValue("$pat", $"%{escaped}%");
 
         using var r = cmd.ExecuteReader();
@@ -872,7 +903,7 @@ public sealed class DatabaseService : IDisposable
             var content = r.GetString(2);
             var path = BuildPath(id);
 
-            if (title.Contains(kw, StringComparison.OrdinalIgnoreCase))
+            if (title.IndexOf(kw, StringComparison.OrdinalIgnoreCase) >= 0)
             {
                 hits.Add(new SearchHit { NodeId = id, NodeTitle = title, Breadcrumb = path, LineNumber = 0, Snippet = "[命中标题] " + title });
             }
@@ -888,7 +919,16 @@ public sealed class DatabaseService : IDisposable
                         var start = Math.Max(0, idx - 22);
                         var len = Math.Min(line.Length - start, kw.Length + 60);
                         var snip = (start > 0 ? "..." : "") + line.Substring(start, len).Trim() + (start + len < line.Length ? "..." : "");
-                        hits.Add(new SearchHit { NodeId = id, NodeTitle = title, Breadcrumb = path, LineNumber = i + 1, Snippet = $"第 {i + 1} 行: {snip}" });
+                        hits.Add(new SearchHit
+                        {
+                            NodeId = id,
+                            NodeTitle = title,
+                            Breadcrumb = path,
+                            LineNumber = i + 1,
+                            CharOffsetInLine = idx,
+                            MatchLength = kw.Length,
+                            Snippet = $"第 {i + 1} 行: {snip}"
+                        });
                         idx = line.IndexOf(kw, idx + kw.Length, StringComparison.OrdinalIgnoreCase);
                     }
                 }
@@ -958,7 +998,7 @@ public sealed class DatabaseService : IDisposable
                 var src = fileArchive.ResolveExistingFile(rel);
                 if (src == null) continue;
                 var fileName = rel.StartsWith(FileArchiveService.FilesFolderName + "/", StringComparison.OrdinalIgnoreCase)
-                    ? rel[(FileArchiveService.FilesFolderName.Length + 1)..]
+                    ? rel.Substring(FileArchiveService.FilesFolderName.Length + 1)
                     : Path.GetFileName(src);
                 var dst = Path.Combine(exportFilesDir, fileName.Replace('/', Path.DirectorySeparatorChar));
                 Directory.CreateDirectory(Path.GetDirectoryName(dst)!);
