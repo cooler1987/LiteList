@@ -1,0 +1,502 @@
+<Window x:Class="LiteList.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:ae="http://icsharpcode.net/sharpdevelop/avalonedit"
+        Title="LiteList" Width="1280" Height="800" MinWidth="760" MinHeight="500"
+        Background="{DynamicResource AppBg}" Foreground="{DynamicResource TextFg}"
+        Closing="Window_Closing" Deactivated="Window_Deactivated"
+        PreviewKeyDown="Window_PreviewKeyDown">
+    <Window.Resources>
+        <BooleanToVisibilityConverter x:Key="BoolToVis"/>
+
+        <!-- 自定义干净按钮模板，彻底避免系统主题鼠标悬停时发白看不清 -->
+        <Style x:Key="FlatToolBtn" TargetType="Button">
+            <Setter Property="Background" Value="{DynamicResource SurfaceBg}"/>
+            <Setter Property="Foreground" Value="{DynamicResource TextFg}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding" Value="9,4"/>
+            <Setter Property="Margin" Value="2,0"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Bd" Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="4" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="{DynamicResource HoverBg}"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="{DynamicResource ActiveBg}"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="MiniFmtBtn" TargetType="Button">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Foreground" Value="{DynamicResource TextFg}"/>
+            <Setter Property="Padding" Value="7,3"/>
+            <Setter Property="Margin" Value="1,0"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Bd" Background="{TemplateBinding Background}" CornerRadius="4" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="{DynamicResource HoverBg}"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="FindToggleBtn" TargetType="ToggleButton">
+            <Setter Property="Background" Value="{DynamicResource SurfaceBg}"/>
+            <Setter Property="Foreground" Value="{DynamicResource TextFg}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding" Value="6,3"/>
+            <Setter Property="FontSize" Value="11.5"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ToggleButton">
+                        <Border x:Name="Bd" Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="4" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="{DynamicResource HoverBg}"/>
+                            </Trigger>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="{DynamicResource AccentBrush}"/>
+                                <Setter Property="Foreground" Value="White"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Window.Resources>
+
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="42"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <!-- 顶部工具栏 -->
+        <Border Grid.Row="0" Background="{DynamicResource SidebarBg}"
+                BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,0,1" Padding="8,0">
+            <DockPanel LastChildFill="False">
+                <StackPanel Orientation="Horizontal" DockPanel.Dock="Left" VerticalAlignment="Center">
+                    <Button Style="{StaticResource FlatToolBtn}" Content="☰ 目录"
+                            ToolTip="显示/隐藏左侧大纲 (Ctrl+\)" Click="BtnToggleLeft_Click"/>
+                    <Border Background="{DynamicResource SurfaceBg}" BorderBrush="{DynamicResource BorderBrush}"
+                            BorderThickness="1" CornerRadius="4" Padding="8,3" Margin="4,0">
+                        <TextBlock x:Name="TxtDbBadge" Text="notes.llist" FontSize="12" FontWeight="SemiBold"
+                                   MaxWidth="180" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
+                    </Border>
+                    <Button Style="{StaticResource FlatToolBtn}" Content="新建库" Click="BtnNewDb_Click"/>
+                    <Button Style="{StaticResource FlatToolBtn}" Content="打开库" Click="BtnOpenDb_Click"/>
+                    <Button x:Name="BtnExportMenu" Style="{StaticResource FlatToolBtn}" Content="导出 MD ▾" Click="BtnExportMenu_Click">
+                        <Button.ContextMenu>
+                            <ContextMenu>
+                                <MenuItem Header="仅导出当前选中节点 (.md)" Click="MenuExportSingleNode_Click"/>
+                                <MenuItem Header="导出当前节点及全部子级 (.md)" Click="MenuExportSubtree_Click"/>
+                                <Separator/>
+                                <MenuItem Header="导出全部笔记库 (.md)" Click="MenuExportAll_Click"/>
+                            </ContextMenu>
+                        </Button.ContextMenu>
+                    </Button>
+                    <Button Style="{StaticResource FlatToolBtn}" Content="保存 (Ctrl+S)" Click="BtnSave_Click"/>
+                    <Button Style="{StaticResource FlatToolBtn}" Content="设置" Click="BtnSettings_Click"/>
+                </StackPanel>
+
+                <StackPanel Orientation="Horizontal" DockPanel.Dock="Right" VerticalAlignment="Center">
+                    <TextBlock x:Name="TxtSaveStatus" Text="已保存" FontSize="12" Margin="6,0,10,0"
+                               VerticalAlignment="Center" Foreground="{DynamicResource MutedFg}"/>
+                    <Button Style="{StaticResource FlatToolBtn}" Content="A-" ToolTip="减小正文字号" Click="BtnFontMinus_Click"/>
+                    <Button Style="{StaticResource FlatToolBtn}" Content="A+" ToolTip="增大正文字号" Click="BtnFontPlus_Click"/>
+                    <Button Style="{StaticResource FlatToolBtn}" Content="🔍 全局搜索 (Ctrl+K)" Width="165" Click="BtnQuickSearch_Click"/>
+                    <Button Style="{StaticResource FlatToolBtn}" Content="正文大纲 ☰"
+                            ToolTip="显示/隐藏右侧正文大纲 (Ctrl+/)" Click="BtnToggleRight_Click"/>
+                </StackPanel>
+            </DockPanel>
+        </Border>
+
+        <!-- 主体三栏布局 -->
+        <Grid Grid.Row="1">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition x:Name="ColLeftTree" Width="260" MinWidth="0"/>
+                <ColumnDefinition x:Name="ColLeftSplit" Width="4"/>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition x:Name="ColRightSplit" Width="4"/>
+                <ColumnDefinition x:Name="ColRightToc" Width="220" MinWidth="0"/>
+            </Grid.ColumnDefinitions>
+
+            <!-- 左侧：全局大纲 -->
+            <Border x:Name="LeftSidebar" Grid.Column="0" Background="{DynamicResource SidebarBg}"
+                    BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,1,0">
+                <DockPanel>
+                    <Border DockPanel.Dock="Top" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,0,1" Padding="8,6">
+                        <DockPanel>
+                            <TextBlock Text="全局大纲" FontSize="11.5" FontWeight="Bold" Foreground="{DynamicResource MutedFg}" VerticalAlignment="Center"/>
+                            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                                <Button Style="{StaticResource MiniFmtBtn}" Content="⊞" ToolTip="全部展开" Click="BtnExpandAllTree_Click"/>
+                                <Button Style="{StaticResource MiniFmtBtn}" Content="⊟" ToolTip="全部折叠" Click="BtnCollapseAllTree_Click"/>
+                                <Button Style="{StaticResource MiniFmtBtn}" Content="+" FontWeight="Bold" ToolTip="新建根节点" Click="BtnAddRoot_Click"/>
+                            </StackPanel>
+                        </DockPanel>
+                    </Border>
+
+                    <TreeView x:Name="OutlineTree" Background="Transparent" BorderThickness="0" Padding="4"
+                              AllowDrop="True"
+                              SelectedItemChanged="OutlineTree_SelectedItemChanged"
+                              PreviewKeyDown="OutlineTree_PreviewKeyDown"
+                              PreviewMouseLeftButtonDown="OutlineTree_PreviewMouseLeftButtonDown"
+                              PreviewMouseMove="OutlineTree_PreviewMouseMove"
+                              DragOver="OutlineTree_DragOver"
+                              Drop="OutlineTree_Drop">
+                        <TreeView.ItemContainerStyle>
+                            <Style TargetType="TreeViewItem">
+                                <Setter Property="IsExpanded" Value="{Binding IsExpanded, Mode=TwoWay}"/>
+                                <Setter Property="IsSelected" Value="{Binding IsSelected, Mode=TwoWay}"/>
+                                <Setter Property="Foreground" Value="{DynamicResource TextFg}"/>
+                                <Setter Property="Padding" Value="2,3"/>
+                                <EventSetter Event="PreviewMouseRightButtonDown" Handler="TreeViewItem_PreviewMouseRightButtonDown"/>
+                                <EventSetter Event="Expanded" Handler="TreeViewItem_ExpandedChanged"/>
+                                <EventSetter Event="Collapsed" Handler="TreeViewItem_ExpandedChanged"/>
+                            </Style>
+                        </TreeView.ItemContainerStyle>
+                        <TreeView.ItemTemplate>
+                            <HierarchicalDataTemplate ItemsSource="{Binding Children}">
+                                <Grid>
+                                    <TextBlock Text="{Binding Title}" FontSize="13" VerticalAlignment="Center">
+                                        <TextBlock.Style>
+                                            <Style TargetType="TextBlock">
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding IsRenaming}" Value="True">
+                                                        <Setter Property="Visibility" Value="Collapsed"/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </TextBlock.Style>
+                                    </TextBlock>
+                                    <TextBox Text="{Binding Title, UpdateSourceTrigger=PropertyChanged}" FontSize="13" MinWidth="120"
+                                             Visibility="{Binding IsRenaming, Converter={StaticResource BoolToVis}}"
+                                             IsVisibleChanged="RenameBox_IsVisibleChanged"
+                                             KeyDown="RenameBox_KeyDown" LostFocus="RenameBox_LostFocus"/>
+                                </Grid>
+                            </HierarchicalDataTemplate>
+                        </TreeView.ItemTemplate>
+                        <TreeView.ContextMenu>
+                            <ContextMenu>
+                                <MenuItem Header="新建子节点" Click="CtxAddChild_Click"/>
+                                <MenuItem Header="新建同级节点 (Enter)" Click="CtxAddSibling_Click"/>
+                                <MenuItem Header="重命名 (F2)" Click="CtxRename_Click"/>
+                                <MenuItem Header="克隆节点（含子级）" Click="CtxDuplicate_Click"/>
+                                <Separator/>
+                                <MenuItem Header="同级上移" Click="CtxMoveUp_Click"/>
+                                <MenuItem Header="同级下移" Click="CtxMoveDown_Click"/>
+                                <MenuItem Header="子项按标题排序" Click="CtxSortChildren_Click"/>
+                                <Separator/>
+                                <MenuItem Header="仅导出此节点为 MD..." Click="MenuExportSingleNode_Click"/>
+                                <MenuItem Header="导出此分支（含子级）为 MD..." Click="MenuExportSubtree_Click"/>
+                                <Separator/>
+                                <MenuItem Header="删除节点 (Del)" Foreground="{DynamicResource DangerBrush}" Click="CtxDelete_Click"/>
+                            </ContextMenu>
+                        </TreeView.ContextMenu>
+                    </TreeView>
+                </DockPanel>
+            </Border>
+
+            <GridSplitter x:Name="LeftSplitter" Grid.Column="1" Width="4" HorizontalAlignment="Stretch"
+                          Background="Transparent" ResizeBehavior="PreviousAndNext"/>
+
+            <!-- 中央：编辑与预览区 -->
+            <Grid Grid.Column="2" Background="{DynamicResource AppBg}">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="24"/>
+                </Grid.RowDefinitions>
+
+                <StackPanel x:Name="EmptyOverlay" Grid.RowSpan="4" VerticalAlignment="Center" HorizontalAlignment="Center" Visibility="Collapsed">
+                    <TextBlock Text="点击左侧节点开始编辑，或点击 + 新建根节点" FontSize="14" Foreground="{DynamicResource MutedFg}"/>
+                </StackPanel>
+
+                <!-- 标题栏与三视图切换 -->
+                <Border x:Name="EditorHeaderBar" Grid.Row="0" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,0,1" Padding="14,8">
+                    <DockPanel>
+                        <StackPanel Orientation="Horizontal" DockPanel.Dock="Right" VerticalAlignment="Center">
+                            <Button x:Name="BtnViewEdit" Style="{StaticResource FlatToolBtn}" Content="编辑" Click="BtnViewEdit_Click"/>
+                            <Button x:Name="BtnViewSplit" Style="{StaticResource FlatToolBtn}" Content="对照" Click="BtnViewSplit_Click"/>
+                            <Button x:Name="BtnViewPreview" Style="{StaticResource FlatToolBtn}" Content="预览" Click="BtnViewPreview_Click"/>
+                        </StackPanel>
+                        <TextBox x:Name="TxtNodeTitle" BorderThickness="0" Background="Transparent"
+                                 Foreground="{DynamicResource TextFg}" CaretBrush="{DynamicResource CaretBrush}"
+                                 FontSize="19" FontWeight="Bold" VerticalContentAlignment="Center"
+                                 TextChanged="TxtNodeTitle_TextChanged"/>
+                    </DockPanel>
+                </Border>
+
+                <!-- Markdown 快捷排版栏 -->
+                <Border x:Name="FormatToolBar" Grid.Row="1" Background="{DynamicResource SidebarBg}"
+                        BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,0,1" Padding="8,3">
+                    <WrapPanel Orientation="Horizontal">
+                        <Button Style="{StaticResource MiniFmtBtn}" Content="↶" ToolTip="撤销 (Ctrl+Z)" Click="FmtUndo_Click"/>
+                        <Button Style="{StaticResource MiniFmtBtn}" Content="↷" ToolTip="重做 (Ctrl+Y)" Click="FmtRedo_Click"/>
+                        <Separator Style="{StaticResource {x:Static ToolBar.SeparatorStyleKey}}" Margin="4,2"/>
+                        <Button Style="{StaticResource MiniFmtBtn}" Content="H" FontWeight="Bold" ToolTip="切换标题级别" Click="FmtHeading_Click"/>
+                        <Button Style="{StaticResource MiniFmtBtn}" Content="B" FontWeight="Bold" ToolTip="加粗 (Ctrl+B)" Click="FmtBold_Click"/>
+                        <Button Style="{StaticResource MiniFmtBtn}" Content="I" FontStyle="Italic" ToolTip="斜体 (Ctrl+I)" Click="FmtItalic_Click"/>
+                        <Button Style="{StaticResource MiniFmtBtn}" Content="S" ToolTip="删除线" Click="FmtStrike_Click"/>
+                        <Button Style="{StaticResource MiniFmtBtn}" Content="`c`" ToolTip="行内代码" Click="FmtInlineCode_Click"/>
+                        <Button Style="{StaticResource MiniFmtBtn}" Content="代码块" Click="FmtCodeBlock_Click"/>
+                        <Button Style="{StaticResource MiniFmtBtn}" Content="&gt; 引用" Click="FmtQuote_Click"/>
+                        <Button Style="{StaticResource MiniFmtBtn}" Content="[ ] 待办" Click="FmtTask_Click"/>
+                        <Button Style="{StaticResource MiniFmtBtn}" Content="链接" ToolTip="插入链接 (Ctrl+L)" Click="FmtLink_Click"/>
+                        <Button Style="{StaticResource MiniFmtBtn}" Content="表格" Click="FmtTable_Click"/>
+                        <Button Style="{StaticResource MiniFmtBtn}" Content="📎 插图/附件" ToolTip="复制文件至 files/ 并插入" Click="FmtInsertFile_Click"/>
+                        <Separator Style="{StaticResource {x:Static ToolBar.SeparatorStyleKey}}" Margin="4,2"/>
+                        <Button Style="{StaticResource MiniFmtBtn}" Content="全部折叠" Click="FmtFoldAll_Click"/>
+                        <Button Style="{StaticResource MiniFmtBtn}" Content="全部展开" Click="FmtUnfoldAll_Click"/>
+                        <Button Style="{StaticResource MiniFmtBtn}" Content="🔍 查找替换" ToolTip="Ctrl+F / Ctrl+H" Click="FmtFind_Click"/>
+                    </WrapPanel>
+                </Border>
+
+                <!-- 编辑区 + 自绘悬浮查找条 + 预览区 -->
+                <Grid Grid.Row="2">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition x:Name="ColEditor" Width="*"/>
+                        <ColumnDefinition x:Name="ColSplitLine" Width="0"/>
+                        <ColumnDefinition x:Name="ColPreview" Width="*"/>
+                    </Grid.ColumnDefinitions>
+
+                    <ae:TextEditor x:Name="MdEditor" Grid.Column="0"
+                                   ShowLineNumbers="True" WordWrap="True"
+                                   Background="{DynamicResource AppBg}" Foreground="{DynamicResource TextFg}"
+                                   LineNumbersForeground="{DynamicResource MutedFg}"
+                                   Padding="4,6" AllowDrop="True"
+                                   PreviewDragOver="MdEditor_PreviewDragOver" Drop="MdEditor_Drop"
+                                   PreviewMouseWheel="MdEditor_PreviewMouseWheel">
+                        <ae:TextEditor.ContextMenu>
+                            <ContextMenu>
+                                <MenuItem Header="撤销 (Ctrl+Z)" Click="FmtUndo_Click"/>
+                                <MenuItem Header="重做 (Ctrl+Y)" Click="FmtRedo_Click"/>
+                                <Separator/>
+                                <MenuItem Header="剪切 (Ctrl+X)" Click="EdCut_Click"/>
+                                <MenuItem Header="复制 (Ctrl+C)" Click="EdCopy_Click"/>
+                                <MenuItem Header="粘贴 (Ctrl+V，自动归档图片/附件)" Click="EdPaste_Click"/>
+                                <MenuItem Header="全选 (Ctrl+A)" Click="EdSelectAll_Click"/>
+                                <Separator/>
+                                <MenuItem Header="加粗 (Ctrl+B)" Click="FmtBold_Click"/>
+                                <MenuItem Header="斜体 (Ctrl+I)" Click="FmtItalic_Click"/>
+                                <MenuItem Header="插入代码块" Click="FmtCodeBlock_Click"/>
+                                <MenuItem Header="插入待办 - [ ]" Click="FmtTask_Click"/>
+                                <MenuItem Header="插入表格" Click="FmtTable_Click"/>
+                                <MenuItem Header="插入图片 / 附件..." Click="FmtInsertFile_Click"/>
+                                <Separator/>
+                                <MenuItem Header="查找与替换 (Ctrl+F)" Click="FmtFind_Click"/>
+                                <MenuItem Header="折叠全部标题与缩进块" Click="FmtFoldAll_Click"/>
+                                <MenuItem Header="展开全部折叠" Click="FmtUnfoldAll_Click"/>
+                            </ContextMenu>
+                        </ae:TextEditor.ContextMenu>
+                    </ae:TextEditor>
+
+                    <!-- 悬浮查找替换条 -->
+                    <Border x:Name="FindBar" Grid.Column="0" HorizontalAlignment="Right" VerticalAlignment="Top"
+                            Margin="0,8,20,0" Padding="8" CornerRadius="6" Visibility="Collapsed"
+                            Background="{DynamicResource SidebarBg}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1">
+                        <StackPanel>
+                            <StackPanel Orientation="Horizontal">
+                                <TextBox x:Name="TxtFind" Width="170" Padding="5,3" FontSize="12.5"
+                                         Background="{DynamicResource SurfaceBg}" Foreground="{DynamicResource TextFg}"
+                                         BorderBrush="{DynamicResource BorderBrush}" CaretBrush="{DynamicResource CaretBrush}"
+                                         TextChanged="TxtFind_TextChanged" PreviewKeyDown="TxtFind_PreviewKeyDown"/>
+                                <ToggleButton x:Name="ChkCase" Style="{StaticResource FindToggleBtn}" Content="Aa" Margin="4,0,0,0"
+                                              ToolTip="区分大小写" Checked="FindOption_Changed" Unchecked="FindOption_Changed"/>
+                                <ToggleButton x:Name="ChkRegex" Style="{StaticResource FindToggleBtn}" Content=".*" Margin="2,0,0,0"
+                                              ToolTip="正则表达式" Checked="FindOption_Changed" Unchecked="FindOption_Changed"/>
+                                <TextBlock x:Name="TxtFindCount" Text="0/0" VerticalAlignment="Center" Margin="6,0"
+                                           FontSize="11.5" Foreground="{DynamicResource MutedFg}" MinWidth="42" TextAlignment="Center"/>
+                                <Button Style="{StaticResource FlatToolBtn}" Content="↑" ToolTip="上一个 (Shift+F3)" Click="BtnFindPrev_Click"/>
+                                <Button Style="{StaticResource FlatToolBtn}" Content="↓" ToolTip="下一个 (F3)" Click="BtnFindNext_Click"/>
+                                <Button Style="{StaticResource FlatToolBtn}" Content="×" ToolTip="关闭 (Esc)" Click="BtnCloseFind_Click"/>
+                            </StackPanel>
+                            <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
+                                <TextBox x:Name="TxtReplace" Width="170" Padding="5,3" FontSize="12.5"
+                                         Background="{DynamicResource SurfaceBg}" Foreground="{DynamicResource TextFg}"
+                                         BorderBrush="{DynamicResource BorderBrush}" CaretBrush="{DynamicResource CaretBrush}"/>
+                                <Button Style="{StaticResource FlatToolBtn}" Content="替换" Margin="4,0,0,0" Click="BtnReplaceOne_Click"/>
+                                <Button Style="{StaticResource FlatToolBtn}" Content="全部替换" Click="BtnReplaceAll_Click"/>
+                            </StackPanel>
+                        </StackPanel>
+                    </Border>
+
+                    <Border Grid.Column="1" Background="{DynamicResource BorderBrush}"/>
+
+                    <FlowDocumentScrollViewer x:Name="PreviewViewer" Grid.Column="2"
+                                              IsToolBarVisible="False" VerticalScrollBarVisibility="Auto"
+                                              Background="{DynamicResource AppBg}"
+                                              MouseDoubleClick="PreviewViewer_MouseDoubleClick"
+                                              PreviewMouseWheel="PreviewViewer_PreviewMouseWheel">
+                        <FlowDocumentScrollViewer.ContextMenu>
+                            <ContextMenu>
+                                <MenuItem Header="切换到编辑模式 (Ctrl+E)" Click="BtnViewEdit_Click"/>
+                                <MenuItem Header="复制选中文本" Click="PreviewCopySel_Click"/>
+                                <MenuItem Header="复制节点 Markdown 原文" Click="PreviewCopyMd_Click"/>
+                                <Separator/>
+                                <MenuItem Header="仅导出此节点为 MD..." Click="MenuExportSingleNode_Click"/>
+                            </ContextMenu>
+                        </FlowDocumentScrollViewer.ContextMenu>
+                    </FlowDocumentScrollViewer>
+                </Grid>
+
+                <!-- 底部状态栏 -->
+                <Border Grid.Row="3" Background="{DynamicResource SidebarBg}"
+                        BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0" Padding="12,0">
+                    <DockPanel>
+                        <StackPanel Orientation="Horizontal" DockPanel.Dock="Left" VerticalAlignment="Center">
+                            <TextBlock x:Name="TxtCursorInfo" Text="行 1, 列 1" FontSize="11.5" Foreground="{DynamicResource MutedFg}"/>
+                            <TextBlock x:Name="TxtDocStats" Text="0 字 · 1 行" FontSize="11.5" Margin="16,0,0,0" Foreground="{DynamicResource MutedFg}"/>
+                        </StackPanel>
+                        <TextBlock x:Name="TxtFilesDirInfo" HorizontalAlignment="Right" VerticalAlignment="Center"
+                                   Text="附件目录: files/" FontSize="11.5" Foreground="{DynamicResource MutedFg}"/>
+                    </DockPanel>
+                </Border>
+            </Grid>
+
+            <GridSplitter x:Name="RightSplitter" Grid.Column="3" Width="4" HorizontalAlignment="Stretch"
+                          Background="Transparent" ResizeBehavior="PreviousAndNext"/>
+
+            <!-- 右侧：当前节点正文大纲 -->
+            <Border x:Name="RightTocPanel" Grid.Column="4" Background="{DynamicResource SidebarBg}"
+                    BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1,0,0,0">
+                <DockPanel>
+                    <Border DockPanel.Dock="Top" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,0,1" Padding="10,7">
+                        <TextBlock Text="正文大纲" FontSize="11.5" FontWeight="Bold" Foreground="{DynamicResource MutedFg}"/>
+                    </Border>
+                    <ListBox x:Name="LstRightToc" Background="Transparent" BorderThickness="0" Padding="4"
+                             ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                             SelectionChanged="LstRightToc_SelectionChanged">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate>
+                                <TextBlock Text="{Binding DisplayText}" FontSize="12.5" Padding="4,3"
+                                           Foreground="{DynamicResource TextFg}" TextTrimming="CharacterEllipsis"/>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                </DockPanel>
+            </Border>
+        </Grid>
+
+        <!-- 内嵌浮层 1：Ctrl+K 全局搜索（精确定位行号） -->
+        <Grid x:Name="SearchOverlay" Grid.RowSpan="2" Background="#66000000" Visibility="Collapsed" MouseDown="SearchOverlay_MouseDown">
+            <Border Width="640" MaxHeight="470" VerticalAlignment="Top" Margin="0,70,0,0"
+                    Background="{DynamicResource AppBg}" BorderBrush="{DynamicResource BorderBrush}"
+                    BorderThickness="1" CornerRadius="8" Padding="12">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+                    <Border Grid.Row="0" Background="{DynamicResource SidebarBg}" BorderBrush="{DynamicResource BorderBrush}"
+                            BorderThickness="1" CornerRadius="6" Padding="8,6" Margin="0,0,0,8">
+                        <DockPanel>
+                            <Button Style="{StaticResource FlatToolBtn}" DockPanel.Dock="Right" Content="Esc" Click="BtnCloseSearchOverlay_Click"/>
+                            <TextBlock Text="🔍" VerticalAlignment="Center" Margin="0,0,8,0" Foreground="{DynamicResource MutedFg}"/>
+                            <TextBox x:Name="TxtGlobalSearch" BorderThickness="0" Background="Transparent"
+                                     Foreground="{DynamicResource TextFg}" CaretBrush="{DynamicResource CaretBrush}"
+                                     FontSize="15" VerticalContentAlignment="Center"
+                                     TextChanged="TxtGlobalSearch_TextChanged" PreviewKeyDown="TxtGlobalSearch_PreviewKeyDown"/>
+                        </DockPanel>
+                    </Border>
+                    <ListBox x:Name="LstGlobalHits" Grid.Row="1" MaxHeight="330" Background="{DynamicResource AppBg}"
+                             BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"
+                             ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                             MouseDoubleClick="LstGlobalHits_MouseDoubleClick" PreviewKeyDown="LstGlobalHits_PreviewKeyDown">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate>
+                                <StackPanel Margin="4,3">
+                                    <DockPanel>
+                                        <TextBlock Text="{Binding NodeTitle}" FontWeight="SemiBold" FontSize="13.5" Foreground="{DynamicResource TextFg}"/>
+                                        <TextBlock Text="{Binding Breadcrumb}" FontSize="11.5" Margin="10,1,0,0" Foreground="{DynamicResource MutedFg}" TextTrimming="CharacterEllipsis"/>
+                                    </DockPanel>
+                                    <TextBlock Text="{Binding Snippet}" FontSize="12.5" Margin="0,2,0,0" Foreground="{DynamicResource AccentBrush}" TextTrimming="CharacterEllipsis"/>
+                                </StackPanel>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                    <TextBlock Grid.Row="2" Margin="0,8,0,0" FontSize="12" Foreground="{DynamicResource MutedFg}"
+                               Text="↑↓ 选择命中行 · Enter 或双击精准跳转到所在行并自动展开折叠"/>
+                </Grid>
+            </Border>
+        </Grid>
+
+        <!-- 内嵌浮层 2：设置面板 -->
+        <Grid x:Name="SettingsOverlay" Grid.RowSpan="2" Background="#66000000" Visibility="Collapsed" MouseDown="SettingsOverlay_MouseDown">
+            <Border Width="460" VerticalAlignment="Center" HorizontalAlignment="Center"
+                    Background="{DynamicResource AppBg}" BorderBrush="{DynamicResource BorderBrush}"
+                    BorderThickness="1" CornerRadius="8" Padding="20">
+                <StackPanel>
+                    <TextBlock Text="LiteList 设置" FontWeight="Bold" FontSize="16" Margin="0,0,0,14"/>
+                    <TextBlock Text="保存策略" FontWeight="SemiBold" FontSize="13.5" Margin="0,0,0,6"/>
+                    <RadioButton x:Name="RbManual" Content="手动安全模式（默认零卡顿：Ctrl+S 保存，切换/退出提示）"
+                                 Foreground="{DynamicResource TextFg}" Margin="0,0,0,6"/>
+                    <RadioButton x:Name="RbIdleAuto" Content="空闲自动保存模式（停止输入 3 秒后静默写入）"
+                                 Foreground="{DynamicResource TextFg}" Margin="0,0,0,14"/>
+
+                    <TextBlock Text="窗口失去焦点时（切去其他软件）" FontWeight="SemiBold" FontSize="13.5" Margin="0,0,0,6"/>
+                    <ComboBox x:Name="CmbBlurAction" Margin="0,0,0,14" Padding="6,4">
+                        <ComboBoxItem Content="不作处理（保留未保存状态）"/>
+                        <ComboBoxItem Content="弹窗询问是否保存"/>
+                        <ComboBoxItem Content="自动静默保存"/>
+                    </ComboBox>
+
+                    <TextBlock Text="正文字号（默认使用系统字体）" FontWeight="SemiBold" FontSize="13.5" Margin="0,0,0,6"/>
+                    <DockPanel Margin="0,0,0,14">
+                        <TextBlock x:Name="TxtSetFontLabel" Width="56" VerticalAlignment="Center" Text="15 px"/>
+                        <Slider x:Name="SldFontSize" Minimum="12" Maximum="28" TickFrequency="1" IsSnapToTickEnabled="True"
+                                ValueChanged="SldFontSize_ValueChanged"/>
+                    </DockPanel>
+
+                    <CheckBox x:Name="ChkAutoVacuum" Content="退出存盘时自动清理碎片压缩数据库（VACUUM）"
+                              Foreground="{DynamicResource TextFg}" Margin="0,0,0,18"/>
+
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                        <Button Style="{StaticResource FlatToolBtn}" Content="取消" Width="80" Margin="0,0,10,0" Click="BtnSettingsCancel_Click"/>
+                        <Button Style="{StaticResource FlatToolBtn}" Content="确定保存" Width="90" Click="BtnSettingsOk_Click"
+                                Background="{DynamicResource AccentBrush}" Foreground="White" BorderThickness="0"/>
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+        </Grid>
+
+        <!-- 内嵌浮层 3：图片点击放大灯箱 -->
+        <Grid x:Name="LightboxOverlay" Grid.RowSpan="2" Background="#CC000000" Visibility="Collapsed"
+              MouseDown="LightboxOverlay_MouseDown" Cursor="Hand">
+            <Image x:Name="ImgLightbox" Stretch="Uniform" Margin="32"/>
+        </Grid>
+    </Grid>
+</Window>
