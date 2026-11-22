@@ -37,12 +37,14 @@ public sealed class MarkdownScintilla : Scintilla
     public const int StyleLink = 6;
     public const int StyleQuote = 7;
     public const int StyleTask = 8;
-    public const int StyleCodeBlock = 10;
-    public const int StyleCodeFenceOpen = 11;
+    public const int StyleCodeBlockBacktick = 10;
+    public const int StyleCodeFenceOpenBacktick = 11;
     public const int StyleCodeKeyword = 12;
     public const int StyleCodeString = 13;
     public const int StyleCodeComment = 14;
     public const int StyleCodeFenceClose = 15;
+    public const int StyleCodeFenceOpenTilde = 16;
+    public const int StyleCodeBlockTilde = 17;
 
     private const int MarginLineNum = 0;
     private const int MarginFold = 2;
@@ -51,12 +53,13 @@ public sealed class MarkdownScintilla : Scintilla
     private const int FoldLevelBase = 1024;
     private const int FoldHeaderFlag = 0x2000;
 
-    // Scintilla 原生消息常量（绕过 ScintillaNET 逐行 UTF8/UTF16 转换瓶颈）
+    private const int WM_PASTE = 0x0302;
+    private const int WM_MOUSEWHEEL = 0x020A;
+
     private const int SCI_GETSTYLEAT = 2010;
     private const int SCI_GETENDSTYLED = 2028;
     private const int SCI_STARTSTYLING = 2032;
     private const int SCI_SETSTYLING = 2033;
-    private const int SCI_GETLINEENDPOSITION = 2136;
     private const int SCI_LINEFROMPOSITION = 2166;
     private const int SCI_POSITIONFROMLINE = 2167;
     private const int SCI_GETTEXTLENGTH = 2183;
@@ -67,21 +70,24 @@ public sealed class MarkdownScintilla : Scintilla
     private static readonly Regex BoldRegex = new(@"\*\*[^*\r\n]+\*\*", RegexOptions.Compiled);
     private static readonly Regex ItalicRegex = new(@"(?<!\*)\*[^*\s\r\n][^*\r\n]*\*(?!\*)", RegexOptions.Compiled);
     private static readonly Regex StrikeRegex = new(@"~~[^~\r\n]+~~", RegexOptions.Compiled);
-    private static readonly Regex LinkRegex = new(@"!?\[[^\]]*\]\([^\)\r\n]+\)", RegexOptions.Compiled);
-    private static readonly Regex TaskPrefixRegex = new(@"^\s*[-*+]\s+\[[ xX]\]", RegexOptions.Compiled);
+    private static readonly Regex LinkRegex = new(@"!?\[[^\]]*\]\((?:<[^>\r\n]+>|(?:[^()\r\n]|\([^()\r\n]*\))+)\)", RegexOptions.Compiled);
+    private static readonly Regex TaskPrefixRegex = new(@"^\s*(?:[-*+]|\d+\.)\s+\[[ xX]\]", RegexOptions.Compiled);
     private static readonly Regex CodeKeywordRegex = new(
-        @"\b(if|else|for|while|switch|case|return|break|continue|func|function|var|let|const|class|struct|interface|public|private|static|void|int|string|bool|true|false|null|nil|None|def|import|from|async|await|new|throw|try|catch|finally|using|namespace|enum|extends|implements|this|self|select|insert|update|delete|create|table)\b",
+        @"\b(if|else|for|while|switch|case|return|break|continue|func|function|var|let|const|class|struct|interface|public|private|protected|internal|sealed|readonly|override|virtual|static|void|int|long|double|float|string|bool|true|false|null|nil|None|def|import|from|async|await|new|throw|try|catch|finally|using|namespace|enum|extends|implements|this|self|select|insert|update|delete|create|table)\b",
         RegexOptions.Compiled);
-    private static readonly Regex CodeStringRegex = new("\"([^\"\\\\]|\\\\.)*\"|'([^'\\\\]|\\\\.)*'", RegexOptions.Compiled);
-    private static readonly Regex CodeCommentRegex = new(@"(//.*$|#.*$|--.*$)", RegexOptions.Compiled);
+
+    // 单趟按顺序匹配字符串与注释，避免字符串内的 "https://..." 或 "#fff" 被后置注释正则误覆盖
+    private static readonly Regex CodeStringOrCommentRegex = new(
+        @"""(?:[^""\\]|\\.)*""|'(?:[^'\\]|\\.)*'|//.*$|--.*$|(?<=^|\s)#(?!include\b|define\b|region\b|endregion\b|if\b|elif\b|else\b|endif\b|pragma\b).*$",
+        RegexOptions.Compiled);
 
     public event EventHandler<HandledEventArgs>? PasteIntercepted;
     public event Action<WF.Keys>? ShortcutPressed;
+    public event Action<int>? CtrlMouseWheelZoom;
 
     public MarkdownScintilla()
     {
         BorderStyle = WF.BorderStyle.None;
-        // 启用 DirectWrite 硬件加速渲染与自动换行，彻底解决大段中文 GDI 卡顿
         Technology = Technology.DirectWrite;
         BufferedDraw = true;
         WrapMode = WrapMode.Word;
@@ -90,6 +96,7 @@ public sealed class MarkdownScintilla : Scintilla
         UseTabs = false;
         IndentWidth = 2;
         UsePopup(false);
+        Zoom = 0;
 
         Lexer = Lexer.Container;
         StyleNeeded += OnStyleNeeded;
@@ -115,6 +122,7 @@ public sealed class MarkdownScintilla : Scintilla
         Styles[ScintillaNET.Style.Default].BackColor = bg;
         Styles[ScintillaNET.Style.Default].ForeColor = fg;
         StyleClearAll();
+        Zoom = 0;
 
         Styles[ScintillaNET.Style.LineNumber].BackColor = gutterBg;
         Styles[ScintillaNET.Style.LineNumber].ForeColor = muted;
@@ -155,8 +163,10 @@ public sealed class MarkdownScintilla : Scintilla
         }
 
         SetCodeStyle(StyleInlineCode, dark ? "#F472B6" : "#BE185D");
-        SetCodeStyle(StyleCodeBlock, dark ? "#E4E4E7" : "#1F2937");
-        SetCodeStyle(StyleCodeFenceOpen, dark ? "#8E8E98" : "#6B7280");
+        SetCodeStyle(StyleCodeBlockBacktick, dark ? "#E4E4E7" : "#1F2937");
+        SetCodeStyle(StyleCodeBlockTilde, dark ? "#E4E4E7" : "#1F2937");
+        SetCodeStyle(StyleCodeFenceOpenBacktick, dark ? "#8E8E98" : "#6B7280");
+        SetCodeStyle(StyleCodeFenceOpenTilde, dark ? "#8E8E98" : "#6B7280");
         SetCodeStyle(StyleCodeFenceClose, dark ? "#8E8E98" : "#6B7280");
         SetCodeStyle(StyleCodeKeyword, dark ? "#FF7B72" : "#D73A49", bold: true);
         SetCodeStyle(StyleCodeString, dark ? "#A5D6FF" : "#032F62");
@@ -210,11 +220,18 @@ public sealed class MarkdownScintilla : Scintilla
 
     protected override void WndProc(ref WF.Message m)
     {
-        if (m.Msg == 0x0302) // WM_PASTE
+        if (m.Msg == WM_PASTE)
         {
             var args = new HandledEventArgs(false);
             PasteIntercepted?.Invoke(this, args);
             if (args.Handled) return;
+        }
+        else if (m.Msg == WM_MOUSEWHEEL && (WF.Control.ModifierKeys & WF.Keys.Control) != 0)
+        {
+            // 拦截 Ctrl+滚轮，彻底禁用 Scintilla 原生缩放，避免与 WPF 字号缩放叠加造成双重跳变
+            short delta = unchecked((short)((m.WParam.ToInt64() >> 16) & 0xFFFF));
+            if (delta != 0) CtrlMouseWheelZoom?.Invoke(delta > 0 ? 1 : -1);
+            return;
         }
         base.WndProc(ref m);
     }
@@ -232,7 +249,9 @@ public sealed class MarkdownScintilla : Scintilla
             keyData == (WF.Keys.Control | WF.Keys.Oem5) ||
             keyData == (WF.Keys.Control | WF.Keys.OemQuestion) ||
             keyData == (WF.Keys.Control | WF.Keys.Oemplus) ||
+            keyData == (WF.Keys.Control | WF.Keys.Add) ||
             keyData == (WF.Keys.Control | WF.Keys.OemMinus) ||
+            keyData == (WF.Keys.Control | WF.Keys.Subtract) ||
             keyData == WF.Keys.F3 ||
             keyData == (WF.Keys.Shift | WF.Keys.F3))
         {
@@ -248,6 +267,18 @@ public sealed class MarkdownScintilla : Scintilla
         int curLineIdx = CurrentLine;
         if (curLineIdx <= 0) return;
         var prevLine = Lines[curLineIdx - 1];
+
+        // 处于代码块围栏内时禁止自动续写 Markdown 列表或引用前缀
+        if (prevLine.Length > 0)
+        {
+            int st = GetStyleAt(prevLine.Position);
+            if (st == StyleCodeBlockBacktick || st == StyleCodeBlockTilde ||
+                st == StyleCodeFenceOpenBacktick || st == StyleCodeFenceOpenTilde)
+            {
+                return;
+            }
+        }
+
         var prevText = prevLine.Text.TrimEnd('\r', '\n');
         var m = Regex.Match(prevText, @"^(\s*(?:[-*+]\s+\[[ xX]\]\s|[-*+]\s|\d+\.\s|>\s))(.*)$");
         if (!m.Success) return;
@@ -265,9 +296,23 @@ public sealed class MarkdownScintilla : Scintilla
     }
 
     /// <summary>
-    /// 零拷贝 UTF-8 字节级增量着色：跳过纯文本小说行，直接批量 DirectMessage 写入样式
-    /// 5 万字中文文档全量着色耗时约 2~5 毫秒（原方案约 60 秒）
+    /// 在不清空 Scintilla 撤销缓冲区的前提下局部替换指定行文本
     /// </summary>
+    public void ReplaceLinePreservingUndo(int lineNumber1Based, string newLineContent)
+    {
+        int lineIdx = lineNumber1Based - 1;
+        if (lineIdx < 0 || lineIdx >= Lines.Count) return;
+
+        var line = Lines[lineIdx];
+        int start = line.Position;
+        var raw = line.Text;
+        int trimmedLen = raw.TrimEnd('\r', '\n').Length;
+
+        TargetStart = start;
+        TargetEnd = start + trimmedLen;
+        ReplaceTarget(newLineContent);
+    }
+
     private void OnStyleNeeded(object? sender, StyleNeededEventArgs e)
     {
         int startByte = DirectMessage(SCI_GETENDSTYLED, IntPtr.Zero, IntPtr.Zero).ToInt32();
@@ -293,10 +338,20 @@ public sealed class MarkdownScintilla : Scintilla
         Marshal.Copy(ptr, buf, 0, sliceLen);
 
         bool insideFence = false;
+        bool isTildeFence = false;
         if (lineStartByte > 0)
         {
             int prevStyle = DirectMessage(SCI_GETSTYLEAT, (IntPtr)(lineStartByte - 1), IntPtr.Zero).ToInt32();
-            insideFence = prevStyle == StyleCodeFenceOpen || prevStyle == StyleCodeBlock;
+            if (prevStyle == StyleCodeFenceOpenBacktick || prevStyle == StyleCodeBlockBacktick)
+            {
+                insideFence = true;
+                isTildeFence = false;
+            }
+            else if (prevStyle == StyleCodeFenceOpenTilde || prevStyle == StyleCodeBlockTilde)
+            {
+                insideFence = true;
+                isTildeFence = true;
+            }
         }
 
         DirectMessage(SCI_STARTSTYLING, (IntPtr)lineStartByte, IntPtr.Zero);
@@ -330,7 +385,7 @@ public sealed class MarkdownScintilla : Scintilla
                     byte ch = buf[b];
                     if (ch == (byte)'#' || ch == (byte)'*' || ch == (byte)'`' ||
                         ch == (byte)'~' || ch == (byte)'[' || ch == (byte)'>' ||
-                        ch == (byte)'-' || ch == (byte)'+')
+                        ch == (byte)'-' || ch == (byte)'+' || (ch >= (byte)'0' && ch <= (byte)'9'))
                     {
                         mayHaveSyntax = true;
                         break;
@@ -352,35 +407,53 @@ public sealed class MarkdownScintilla : Scintilla
                 : string.Empty;
             string trimmed = contentText.TrimStart();
 
-            if (trimmed.StartsWith("```", StringComparison.Ordinal))
+            if (TryParseFenceLine(trimmed, out char fc, out _))
             {
-                int fenceStyle = insideFence ? StyleCodeFenceClose : StyleCodeFenceOpen;
-                DirectMessage(SCI_SETSTYLING, (IntPtr)lineByteLen, (IntPtr)fenceStyle);
-                insideFence = !insideFence;
-                pos = lineEnd;
-                continue;
+                if (!insideFence)
+                {
+                    isTildeFence = fc == '~';
+                    int openStyle = isTildeFence ? StyleCodeFenceOpenTilde : StyleCodeFenceOpenBacktick;
+                    DirectMessage(SCI_SETSTYLING, (IntPtr)lineByteLen, (IntPtr)openStyle);
+                    insideFence = true;
+                    pos = lineEnd;
+                    continue;
+                }
+                else if ((isTildeFence && fc == '~' || !isTildeFence && fc == '`') && IsClosingFence(trimmed, fc))
+                {
+                    DirectMessage(SCI_SETSTYLING, (IntPtr)lineByteLen, (IntPtr)StyleCodeFenceClose);
+                    insideFence = false;
+                    pos = lineEnd;
+                    continue;
+                }
             }
 
             if (insideFence)
             {
+                int baseBlockStyle = isTildeFence ? StyleCodeBlockTilde : StyleCodeBlockBacktick;
                 if (contentText.Length == 0)
                 {
-                    DirectMessage(SCI_SETSTYLING, (IntPtr)lineByteLen, (IntPtr)StyleCodeBlock);
+                    DirectMessage(SCI_SETSTYLING, (IntPtr)lineByteLen, (IntPtr)baseBlockStyle);
                 }
                 else
                 {
                     int[] charStyles = new int[contentText.Length];
-                    for (int k = 0; k < charStyles.Length; k++) charStyles[k] = StyleCodeBlock;
+                    for (int k = 0; k < charStyles.Length; k++) charStyles[k] = baseBlockStyle;
+
                     ApplyRegexStyle(charStyles, contentText, CodeKeywordRegex, StyleCodeKeyword);
-                    ApplyRegexStyle(charStyles, contentText, CodeStringRegex, StyleCodeString);
-                    ApplyRegexStyle(charStyles, contentText, CodeCommentRegex, StyleCodeComment);
-                    EmitStyledCharsAsUtf8Bytes(contentText, charStyles, lineByteLen - contentByteLen, StyleCodeBlock);
+                    foreach (Match m in CodeStringOrCommentRegex.Matches(contentText))
+                    {
+                        int st = (m.Value[0] == '"' || m.Value[0] == '\'') ? StyleCodeString : StyleCodeComment;
+                        int end = Math.Min(charStyles.Length, m.Index + m.Length);
+                        for (int k = m.Index; k < end; k++) charStyles[k] = st;
+                    }
+                    EmitStyledCharsAsUtf8Bytes(contentText, charStyles, lineByteLen - contentByteLen, baseBlockStyle);
                 }
                 pos = lineEnd;
                 continue;
             }
 
-            if (IsHeadingLine(trimmed, out _))
+            int leadingSpaces = contentText.Length - trimmed.Length;
+            if (leadingSpaces < 4 && IsHeadingLine(trimmed, out _))
             {
                 DirectMessage(SCI_SETSTYLING, (IntPtr)contentByteLen, (IntPtr)StyleHeading);
                 if (lineByteLen > contentByteLen)
@@ -436,7 +509,14 @@ public sealed class MarkdownScintilla : Scintilla
         {
             int st = charStyles[runStart];
             int runEnd = runStart + 1;
-            while (runEnd < charStyles.Length && charStyles[runEnd] == st) runEnd++;
+            while (runEnd < charStyles.Length)
+            {
+                // 严禁在 UTF-16 代理对中间切断，防止 GetByteCount 统计错误造成字节错位
+                bool insideSurrogatePair = char.IsHighSurrogate(contentChars[runEnd - 1]) &&
+                                           char.IsLowSurrogate(contentChars[runEnd]);
+                if (!insideSurrogatePair && charStyles[runEnd] != st) break;
+                runEnd++;
+            }
             int byteLen = Encoding.UTF8.GetByteCount(contentChars, runStart, runEnd - runStart);
             if (byteLen > 0)
                 DirectMessage(SCI_SETSTYLING, (IntPtr)byteLen, (IntPtr)st);
@@ -455,6 +535,35 @@ public sealed class MarkdownScintilla : Scintilla
         }
     }
 
+    private static bool TryParseFenceLine(string trimmed, out char fenceChar, out int fenceLen)
+    {
+        fenceChar = '\0';
+        fenceLen = 0;
+        if (trimmed.Length < 3) return false;
+        char ch = trimmed[0];
+        if (ch != '`' && ch != '~') return false;
+        int len = 0;
+        while (len < trimmed.Length && trimmed[len] == ch) len++;
+        if (len < 3) return false;
+        if (ch == '`' && trimmed.IndexOf('`', len) >= 0) return false;
+        fenceChar = ch;
+        fenceLen = len;
+        return true;
+    }
+
+    private static bool IsClosingFence(string trimmed, char expectedChar)
+    {
+        if (trimmed.Length < 3 || trimmed[0] != expectedChar) return false;
+        int len = 0;
+        while (len < trimmed.Length && trimmed[len] == expectedChar) len++;
+        if (len < 3) return false;
+        for (int i = len; i < trimmed.Length; i++)
+        {
+            if (!char.IsWhiteSpace(trimmed[i])) return false;
+        }
+        return true;
+    }
+
     private static bool IsHeadingLine(string trimmed, out int level)
     {
         level = 0;
@@ -463,38 +572,84 @@ public sealed class MarkdownScintilla : Scintilla
         return level >= 1 && level <= 6 && (level == trimmed.Length || trimmed[level] == ' ');
     }
 
+    private static bool IsSetextUnderline(string trimmed, out int level)
+    {
+        level = 0;
+        if (string.IsNullOrEmpty(trimmed)) return false;
+        char ch = trimmed[0];
+        if (ch != '=' && ch != '-') return false;
+        for (int i = 1; i < trimmed.Length; i++)
+        {
+            if (trimmed[i] != ch && !char.IsWhiteSpace(trimmed[i])) return false;
+            if (trimmed[i] == ' ' && i + 1 < trimmed.Length && trimmed[i + 1] == ch) return false;
+        }
+        level = ch == '=' ? 1 : 2;
+        return true;
+    }
+
+    private static bool IsListOrQuoteLine(string trimmed)
+    {
+        return trimmed.StartsWith(">", StringComparison.Ordinal) ||
+               trimmed.StartsWith("- ", StringComparison.Ordinal) ||
+               trimmed.StartsWith("* ", StringComparison.Ordinal) ||
+               trimmed.StartsWith("+ ", StringComparison.Ordinal) ||
+               Regex.IsMatch(trimmed, @"^\d+[.)]\s");
+    }
+
     public void RebuildFoldLevelsFromText(string fullText)
     {
-        if (string.IsNullOrEmpty(fullText)) return;
-        var lines = fullText.Replace("\r\n", "\n").Split('\n');
+        if (string.IsNullOrEmpty(fullText))
+        {
+            for (int i = 0; i < Lines.Count; i++)
+                DirectMessage(SCI_SETFOLDLEVEL, (IntPtr)i, (IntPtr)FoldLevelBase);
+            return;
+        }
+
+        var lines = DatabaseService.SplitLinesNormalized(fullText);
         int maxLines = Math.Min(lines.Length, Lines.Count);
         bool insideFence = false;
+        char fenceChar = '\0';
+        int fenceLen = 0;
 
         for (int i = 0; i < maxLines; i++)
         {
             var text = lines[i];
             var trimmed = text.TrimStart();
+            int indent = text.Length - trimmed.Length;
             int level;
             int flags = 0;
 
-            if (trimmed.StartsWith("```", StringComparison.Ordinal))
+            if (!insideFence && indent < 4 && TryParseFenceLine(trimmed, out char fc, out int fl))
             {
+                insideFence = true;
+                fenceChar = fc;
+                fenceLen = fl;
                 level = FoldLevelBase + 20;
-                if (!insideFence) { flags = FoldHeaderFlag; insideFence = true; }
-                else { insideFence = false; }
+                flags = FoldHeaderFlag;
+            }
+            else if (insideFence && indent < 4 && IsClosingFence(trimmed, fenceChar) && trimmed.TrimEnd().Length >= fenceLen)
+            {
+                insideFence = false;
+                level = FoldLevelBase + 20;
             }
             else if (insideFence)
             {
                 level = FoldLevelBase + 21;
             }
-            else if (IsHeadingLine(trimmed, out int hLvl))
+            else if (indent < 4 && IsHeadingLine(trimmed, out int hLvl))
             {
                 level = FoldLevelBase + hLvl;
                 flags = FoldHeaderFlag;
             }
+            else if (!string.IsNullOrWhiteSpace(trimmed) && !IsListOrQuoteLine(trimmed) && indent < 4 &&
+                     i + 1 < maxLines && (lines[i + 1].Length - lines[i + 1].TrimStart().Length) < 4 &&
+                     IsSetextUnderline(lines[i + 1].TrimStart(), out int sLvl))
+            {
+                level = FoldLevelBase + sLvl;
+                flags = FoldHeaderFlag;
+            }
             else
             {
-                int indent = text.Length - trimmed.Length;
                 bool isList = trimmed.StartsWith("- ", StringComparison.Ordinal) ||
                               trimmed.StartsWith("* ", StringComparison.Ordinal) ||
                               trimmed.StartsWith("+ ", StringComparison.Ordinal) ||
@@ -522,51 +677,58 @@ public sealed class MarkdownScintilla : Scintilla
         var roots = new ObservableCollection<HeadingNodeVM>();
         if (string.IsNullOrEmpty(fullText)) return roots;
 
+        var lines = DatabaseService.SplitLinesNormalized(fullText);
         var stack = new Stack<HeadingNodeVM>();
         bool insideFence = false;
-        int lineNum = 0;
-        int pos = 0;
+        char fenceChar = '\0';
+        int fenceLen = 0;
 
-        while (pos <= fullText.Length)
+        void AddHeading(int lvl, string title, int lineNum)
         {
-            int nl = fullText.IndexOf('\n', pos);
-            int end = nl >= 0 ? nl : fullText.Length;
-            lineNum++;
+            var node = new HeadingNodeVM { Level = lvl, Text = title, LineNumber = lineNum };
+            while (stack.Count > 0 && stack.Peek().Level >= lvl) stack.Pop();
+            if (stack.Count == 0) roots.Add(node);
+            else stack.Peek().Children.Add(node);
+            stack.Push(node);
+        }
 
-            int len = end - pos;
-            if (len > 0 && fullText[pos + len - 1] == '\r') len--;
+        for (int i = 0; i < lines.Length; i++)
+        {
+            var raw = lines[i];
+            var trimmed = raw.TrimStart();
+            int indent = raw.Length - trimmed.Length;
+            if (string.IsNullOrWhiteSpace(trimmed)) continue;
 
-            if (len > 0)
+            if (!insideFence && indent < 4 && TryParseFenceLine(trimmed, out char fc, out int fl))
             {
-                int firstNonSpace = pos;
-                int limit = pos + len;
-                while (firstNonSpace < limit && char.IsWhiteSpace(fullText[firstNonSpace]))
-                    firstNonSpace++;
-
-                int trimLen = limit - firstNonSpace;
-                if (trimLen >= 3 && fullText[firstNonSpace] == '`' &&
-                    fullText[firstNonSpace + 1] == '`' && fullText[firstNonSpace + 2] == '`')
-                {
-                    insideFence = !insideFence;
-                }
-                else if (!insideFence && trimLen >= 2 && fullText[firstNonSpace] == '#')
-                {
-                    int lvl = 0;
-                    while (lvl < trimLen && lvl < 7 && fullText[firstNonSpace + lvl] == '#') lvl++;
-                    if (lvl >= 1 && lvl <= 6 && lvl < trimLen && fullText[firstNonSpace + lvl] == ' ')
-                    {
-                        string title = fullText.Substring(firstNonSpace + lvl + 1, trimLen - lvl - 1).Trim();
-                        var node = new HeadingNodeVM { Level = lvl, Text = title, LineNumber = lineNum };
-                        while (stack.Count > 0 && stack.Peek().Level >= lvl) stack.Pop();
-                        if (stack.Count == 0) roots.Add(node);
-                        else stack.Peek().Children.Add(node);
-                        stack.Push(node);
-                    }
-                }
+                insideFence = true;
+                fenceChar = fc;
+                fenceLen = fl;
+                continue;
+            }
+            if (insideFence)
+            {
+                if (indent < 4 && IsClosingFence(trimmed, fenceChar) && trimmed.TrimEnd().Length >= fenceLen)
+                    insideFence = false;
+                continue;
             }
 
-            if (nl < 0) break;
-            pos = nl + 1;
+            if (indent >= 4) continue;
+
+            if (IsHeadingLine(trimmed, out int lvl))
+            {
+                string title = trimmed.Substring(lvl).Trim().TrimEnd('#').Trim();
+                AddHeading(lvl, title, i + 1);
+            }
+            else if (!IsListOrQuoteLine(trimmed) && i + 1 < lines.Length)
+            {
+                var nextTrim = lines[i + 1].TrimStart();
+                if (lines[i + 1].Length - nextTrim.Length < 4 && IsSetextUnderline(nextTrim, out int sLvl))
+                {
+                    AddHeading(sLvl, trimmed.Trim(), i + 1);
+                    i++;
+                }
+            }
         }
         return roots;
     }
@@ -590,19 +752,17 @@ public sealed class MarkdownScintilla : Scintilla
         ClearSearchHighlights();
         if (string.IsNullOrEmpty(keyword)) return;
 
+        // 全文 C# 忽略大小写匹配，确保中文/Unicode/ASCII 高亮与后端 SearchOccurrences 完全一致
+        string docText = Text;
         IndicatorCurrent = IndicatorAllMatch;
-        SearchFlags = SearchFlags.None;
-        TargetStart = 0;
-        TargetEnd = TextLength;
+        int searchPos = 0;
         int count = 0;
-        while (count < 120 && SearchInTarget(keyword) >= 0)
+        while (count < 300 && searchPos < docText.Length)
         {
-            int foundStart = TargetStart;
-            int foundEnd = TargetEnd;
-            if (foundEnd <= foundStart) break;
-            IndicatorFillRange(foundStart, foundEnd - foundStart);
-            TargetStart = foundEnd;
-            TargetEnd = TextLength;
+            int foundIdx = docText.IndexOf(keyword, searchPos, StringComparison.OrdinalIgnoreCase);
+            if (foundIdx < 0) break;
+            IndicatorFillRange(foundIdx, keyword.Length);
+            searchPos = foundIdx + keyword.Length;
             count++;
         }
 
@@ -676,6 +836,11 @@ public sealed class VirtualizedMarkdownPreview
     private readonly FileArchiveService _files;
     private readonly FontFamily _monoFamily = new("Consolas, Courier New");
 
+    // 图片解码 LRU 内存缓存，避免虚拟化滚出滑入重复读盘阻塞 UI 线程
+    private readonly Dictionary<string, (long Ticks, BitmapSource Image)> _imgCache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly LinkedList<string> _imgCacheOrder = new();
+    private const int MaxCachedImages = 48;
+
     public List<PreviewBlockVM> AllBlocks { get; } = new();
     public ObservableCollection<PreviewBlockVM> VisibleBlocks { get; } = new();
 
@@ -715,6 +880,12 @@ public sealed class VirtualizedMarkdownPreview
 
     private static int EstimateEndLine(WpfBlock block)
     {
+        if (block is FencedCodeBlock fcb)
+            return fcb.Line + 1 + Math.Max(1, fcb.Lines.Count + 1);
+
+        if (block is LeafBlock lb)
+            return lb.Line + 1 + Math.Max(0, lb.Lines.Count - 1);
+
         int max = block.Line + 1;
         if (block is ContainerBlock cb)
         {
@@ -726,7 +897,7 @@ public sealed class VirtualizedMarkdownPreview
 
     public void RebuildVisibleBlocks()
     {
-        VisibleBlocks.Clear();
+        var desired = new List<PreviewBlockVM>(AllBlocks.Count);
         int hiddenUnderLevel = 0;
 
         foreach (var blk in AllBlocks)
@@ -736,14 +907,18 @@ public sealed class VirtualizedMarkdownPreview
                 if (hiddenUnderLevel > 0 && blk.HeadingLevel > hiddenUnderLevel)
                     continue;
                 hiddenUnderLevel = blk.IsCollapsed ? blk.HeadingLevel : 0;
-                VisibleBlocks.Add(blk);
+                desired.Add(blk);
             }
             else
             {
                 if (hiddenUnderLevel > 0) continue;
-                VisibleBlocks.Add(blk);
+                desired.Add(blk);
             }
         }
+
+        // 增量同步 VisibleBlocks 而非暴力 Clear+重新赋 ItemsSource，最大程度保留虚拟化与滚动位置
+        VisibleBlocks.Clear();
+        foreach (var item in desired) VisibleBlocks.Add(item);
     }
 
     public PreviewBlockVM? EnsureLineVisibleAndFindBlock(int targetLine)
@@ -788,20 +963,7 @@ public sealed class VirtualizedMarkdownPreview
 
     public UIElement BuildBlockElement(PreviewBlockVM vm, double fontSize, string? highlightKw)
     {
-        var el = RenderAstBlock(vm.AstBlock, vm, fontSize, highlightKw) ?? new TextBlock();
-        if (vm.IsSearchActive)
-        {
-            return new Border
-            {
-                BorderBrush = ThemeHelper.GetBrush("AccentBrush"),
-                BorderThickness = new Thickness(3, 0, 0, 0),
-                Padding = new Thickness(8, 2, 4, 2),
-                Background = ThemeHelper.GetBrush("ActiveBg"),
-                CornerRadius = new CornerRadius(3),
-                Child = el
-            };
-        }
-        return el;
+        return RenderAstBlock(vm.AstBlock, vm, fontSize, highlightKw) ?? new TextBlock();
     }
 
     private UIElement? RenderAstBlock(WpfBlock block, PreviewBlockVM? ownerVm, double fontSize, string? kw)
@@ -909,7 +1071,7 @@ public sealed class VirtualizedMarkdownPreview
             case ListBlock lb:
             {
                 var stack = new StackPanel { Margin = new Thickness(8, 3, 0, 5) };
-                int idx = 1;
+                int idx = (lb.IsOrdered && int.TryParse(lb.OrderedStart, out int startNum)) ? startNum : 1;
                 foreach (var itemObj in lb)
                 {
                     if (itemObj is not ListItemBlock lib) continue;
@@ -929,10 +1091,6 @@ public sealed class VirtualizedMarkdownPreview
                                 VerticalAlignment = VerticalAlignment.Top
                             };
                             int ln = subPb.Line + 1;
-                            chk.Click += (_, _) => TaskCheckboxToggled?.Invoke(ln, chk.IsChecked == true);
-                            DockPanel.SetDock(chk, Dock.Left);
-                            row.Children.Add(chk);
-
                             var tb = new TextBlock
                             {
                                 TextWrapping = TextWrapping.Wrap,
@@ -943,6 +1101,17 @@ public sealed class VirtualizedMarkdownPreview
                             };
                             if (tl.Checked) tb.TextDecorations = TextDecorations.Strikethrough;
                             AppendInlines(tb.Inlines, subPb.Inline, fontSize, kw, skipFirstTask: true);
+
+                            chk.Click += (_, _) =>
+                            {
+                                bool next = chk.IsChecked == true;
+                                tl.Checked = next;
+                                tb.Foreground = next ? ThemeHelper.GetBrush("MutedFg") : ThemeHelper.GetBrush("TextFg");
+                                tb.TextDecorations = next ? TextDecorations.Strikethrough : null;
+                                TaskCheckboxToggled?.Invoke(ln, next);
+                            };
+                            DockPanel.SetDock(chk, Dock.Left);
+                            row.Children.Add(chk);
                             innerStack.Children.Add(tb);
                         }
                         else
@@ -975,8 +1144,11 @@ public sealed class VirtualizedMarkdownPreview
             {
                 var grid = new Grid { Margin = new Thickness(0, 6, 0, 8) };
                 int colCount = mdTable.ColumnDefinitions.Count;
-                if (colCount == 0 && mdTable.Count > 0 && mdTable[0] is Markdig.Extensions.Tables.TableRow r0)
-                    colCount = r0.Count;
+                foreach (var rowObj in mdTable)
+                {
+                    if (rowObj is Markdig.Extensions.Tables.TableRow r)
+                        colCount = Math.Max(colCount, r.Count);
+                }
                 for (int c = 0; c < colCount; c++)
                     grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
 
@@ -1070,9 +1242,15 @@ public sealed class VirtualizedMarkdownPreview
         };
         copyBtn.Click += (_, _) =>
         {
-            Clipboard.SetText(codeText);
-            copyBtn.Content = "已复制 ✓";
-            StatusToast?.Invoke("代码已复制");
+            if (TrySetClipboardText(codeText))
+            {
+                copyBtn.Content = "已复制 ✓";
+                StatusToast?.Invoke("代码已复制");
+            }
+            else
+            {
+                StatusToast?.Invoke("剪贴板正被占用，请重试");
+            }
         };
         DockPanel.SetDock(copyBtn, Dock.Right);
         header.Children.Add(copyBtn);
@@ -1093,6 +1271,27 @@ public sealed class VirtualizedMarkdownPreview
         stack.Children.Add(tb);
         outer.Child = stack;
         return outer;
+    }
+
+    public static bool TrySetClipboardText(string text)
+    {
+        for (int i = 0; i < 3; i++)
+        {
+            try
+            {
+                Clipboard.SetDataObject(text, true);
+                return true;
+            }
+            catch (ExternalException)
+            {
+                System.Threading.Thread.Sleep(25);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+        return false;
     }
 
     private void AppendInlines(InlineCollection target, ContainerInline? container,
@@ -1150,8 +1349,7 @@ public sealed class VirtualizedMarkdownPreview
                     {
                         target.Add(new InlineUIContainer(BuildImageControl(url)));
                     }
-                    else if (url.StartsWith("files/", StringComparison.OrdinalIgnoreCase) ||
-                             url.StartsWith("/files/", StringComparison.OrdinalIgnoreCase))
+                    else if (FileArchiveService.IsLocalFilesReference(url))
                     {
                         var label = ExtractPlainText(li);
                         var pill = BuildAttachmentPill(string.IsNullOrEmpty(label) ? Path.GetFileName(url) : label, url);
@@ -1223,6 +1421,39 @@ public sealed class VirtualizedMarkdownPreview
         return text;
     }
 
+    private BitmapSource GetOrDecodeImage(string resolvedPath)
+    {
+        long mtime = File.GetLastWriteTimeUtc(resolvedPath).Ticks;
+        if (_imgCache.TryGetValue(resolvedPath, out var cached) && cached.Ticks == mtime)
+        {
+            _imgCacheOrder.Remove(resolvedPath);
+            _imgCacheOrder.AddLast(resolvedPath);
+            return cached.Image;
+        }
+
+        var bmp = new BitmapImage();
+        using (var fs = new FileStream(resolvedPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+        {
+            bmp.BeginInit();
+            bmp.CacheOption = BitmapCacheOption.OnLoad;
+            bmp.StreamSource = fs;
+            bmp.EndInit();
+        }
+        bmp.Freeze();
+
+        _imgCacheOrder.Remove(resolvedPath);
+        _imgCacheOrder.AddLast(resolvedPath);
+        _imgCache[resolvedPath] = (mtime, bmp);
+
+        while (_imgCacheOrder.Count > MaxCachedImages && _imgCacheOrder.First != null)
+        {
+            var oldest = _imgCacheOrder.First.Value;
+            _imgCacheOrder.RemoveFirst();
+            _imgCache.Remove(oldest);
+        }
+        return bmp;
+    }
+
     private UIElement BuildImageControl(string rawUrl)
     {
         var resolved = _files.ResolveExistingFile(rawUrl);
@@ -1238,16 +1469,7 @@ public sealed class VirtualizedMarkdownPreview
 
         try
         {
-            var bmp = new BitmapImage();
-            using (var fs = new FileStream(resolved, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
-            {
-                bmp.BeginInit();
-                bmp.CacheOption = BitmapCacheOption.OnLoad;
-                bmp.StreamSource = fs;
-                bmp.EndInit();
-            }
-            bmp.Freeze();
-
+            var bmp = GetOrDecodeImage(resolved);
             var img = new Image
             {
                 Source = bmp,
