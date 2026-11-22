@@ -81,6 +81,13 @@ public sealed class AttachmentResult
     public bool IsImage { get; set; }
 }
 
+public sealed class OrphanScanResult
+{
+    public string TargetDir { get; set; } = "";
+    public List<string> FilePaths { get; } = new();
+    public long TotalBytes { get; set; }
+}
+
 public sealed class HeadingNodeVM : INotifyPropertyChanged
 {
     private bool _isExpanded = true;
@@ -104,6 +111,7 @@ public sealed class HeadingNodeVM : INotifyPropertyChanged
 public sealed class TreeNodeVM : INotifyPropertyChanged
 {
     private string _title = "";
+    private string _editingTitle = "";
     private bool _isExpanded = true;
     private bool _isSelected;
     private bool _isRenaming;
@@ -116,6 +124,15 @@ public sealed class TreeNodeVM : INotifyPropertyChanged
     {
         get => _title;
         set { if (_title != value) { _title = value; OnPropertyChanged(); } }
+    }
+
+    /// <summary>
+    /// 专用重命名缓冲字段：输入期间不直接污染 Title，按 Esc 可完整回滚
+    /// </summary>
+    public string EditingTitle
+    {
+        get => _editingTitle;
+        set { if (_editingTitle != value) { _editingTitle = value; OnPropertyChanged(); } }
     }
 
     public bool IsExpanded
@@ -136,6 +153,27 @@ public sealed class TreeNodeVM : INotifyPropertyChanged
         set { if (_isRenaming != value) { _isRenaming = value; OnPropertyChanged(); } }
     }
 
+    public void BeginRename()
+    {
+        EditingTitle = Title;
+        IsRenaming = true;
+    }
+
+    public string CommitRename()
+    {
+        var finalTitle = string.IsNullOrWhiteSpace(EditingTitle) ? "未命名节点" : EditingTitle.Trim();
+        Title = finalTitle;
+        EditingTitle = finalTitle;
+        IsRenaming = false;
+        return finalTitle;
+    }
+
+    public void CancelRename()
+    {
+        EditingTitle = Title;
+        IsRenaming = false;
+    }
+
     public ObservableCollection<TreeNodeVM> Children { get; } = new();
 
     public event PropertyChangedEventHandler? PropertyChanged;
@@ -147,9 +185,12 @@ public static class ThemeHelper
 {
     public static bool IsDarkMode { get; private set; }
 
-    public static void ApplySystemTheme(ResourceDictionary resources)
+    public static bool ApplySystemTheme(ResourceDictionary resources)
     {
-        IsDarkMode = DetectWindowsDarkMode();
+        bool nextDark = DetectWindowsDarkMode();
+        bool changed = nextDark != IsDarkMode || !resources.Contains("AppBg");
+        IsDarkMode = nextDark;
+
         if (IsDarkMode)
         {
             SetBrush(resources, "AppBg", "#18181B");
@@ -161,6 +202,7 @@ public static class ThemeHelper
             SetBrush(resources, "TextFg", "#E4E4E7");
             SetBrush(resources, "MutedFg", "#A1A1AA");
             SetBrush(resources, "AccentBrush", "#60A5FA");
+            SetBrush(resources, "AccentButtonBg", "#2563EB");
             SetBrush(resources, "DangerBrush", "#F87171");
             SetBrush(resources, "CodeBg", "#232329");
             SetBrush(resources, "CaretBrush", "#FFFFFF");
@@ -169,6 +211,16 @@ public static class ThemeHelper
             SetBrush(resources, "StrongColor", "#FAFAFA");
             SetBrush(resources, "ItalicColor", "#C084FC");
             SetBrush(resources, "InlineCodeColor", "#F472B6");
+
+            // 覆盖 WPF 系统默认失焦选中浅灰背景，彻底解决深色模式下失焦白字看不清的问题
+            resources[SystemColors.HighlightBrushKey] = resources["ActiveBg"];
+            resources[SystemColors.HighlightTextBrushKey] = resources["TextFg"];
+            resources[SystemColors.InactiveSelectionHighlightBrushKey] = resources["HoverBg"];
+            resources[SystemColors.InactiveSelectionHighlightTextBrushKey] = resources["TextFg"];
+            resources[SystemColors.WindowBrushKey] = resources["SurfaceBg"];
+            resources[SystemColors.WindowTextBrushKey] = resources["TextFg"];
+            resources[SystemColors.ControlBrushKey] = resources["SurfaceBg"];
+            resources[SystemColors.ControlTextBrushKey] = resources["TextFg"];
         }
         else
         {
@@ -181,6 +233,7 @@ public static class ThemeHelper
             SetBrush(resources, "TextFg", "#1F2937");
             SetBrush(resources, "MutedFg", "#6B7280");
             SetBrush(resources, "AccentBrush", "#2563EB");
+            SetBrush(resources, "AccentButtonBg", "#2563EB");
             SetBrush(resources, "DangerBrush", "#DC2626");
             SetBrush(resources, "CodeBg", "#F3F4F6");
             SetBrush(resources, "CaretBrush", "#111827");
@@ -189,7 +242,17 @@ public static class ThemeHelper
             SetBrush(resources, "StrongColor", "#111827");
             SetBrush(resources, "ItalicColor", "#7C3AED");
             SetBrush(resources, "InlineCodeColor", "#BE185D");
+
+            resources[SystemColors.HighlightBrushKey] = resources["ActiveBg"];
+            resources[SystemColors.HighlightTextBrushKey] = resources["TextFg"];
+            resources[SystemColors.InactiveSelectionHighlightBrushKey] = resources["HoverBg"];
+            resources[SystemColors.InactiveSelectionHighlightTextBrushKey] = resources["TextFg"];
+            resources[SystemColors.WindowBrushKey] = resources["SurfaceBg"];
+            resources[SystemColors.WindowTextBrushKey] = resources["TextFg"];
+            resources[SystemColors.ControlBrushKey] = resources["SurfaceBg"];
+            resources[SystemColors.ControlTextBrushKey] = resources["TextFg"];
         }
+        return changed;
     }
 
     private static bool DetectWindowsDarkMode()
@@ -219,14 +282,16 @@ public static class ThemeHelper
 }
 
 /// <summary>
-/// 图片与附件统一复制到软件所在目录下的 files/ 文件夹
+/// 图片与附件统一管理：优先锚定到当前 .llist 数据库所在目录的 files/，
+/// 保障多库隔离与单库随身迁移；并兼容历史软件根目录 files/ 回退读取。
 /// </summary>
 public sealed class FileArchiveService
 {
     public const string FilesFolderName = "files";
 
+    // 支持链接路径中包含单层成对括号，例如 files/report(1).png
     private static readonly Regex MdLinkRegex = new(
-        @"(!?\[[^\]]*\])\(([^)\r\n]+)\)",
+        @"(!?\[[^\]]*\])\((<[^>\r\n]+>|(?:[^()\r\n]|\([^()\r\n]*\))+)\)",
         RegexOptions.Compiled);
 
     private static readonly Regex HtmlImgRegex = new(
@@ -238,6 +303,8 @@ public sealed class FileArchiveService
         ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico"
     };
 
+    private readonly Dictionary<string, bool> _writabilityCache = new(StringComparer.OrdinalIgnoreCase);
+
     public string AppBaseDir { get; }
     public string? CurrentDbDir { get; set; }
 
@@ -248,19 +315,70 @@ public sealed class FileArchiveService
 
     public static bool IsImageExtension(string ext) => ImageExts.Contains(ext);
 
-    public string GetTargetFilesDir()
+    public static string SafeUnescape(string text)
     {
-        var primary = Path.Combine(AppBaseDir, FilesFolderName);
-        if (IsDirWritable(AppBaseDir)) return primary;
-        if (!string.IsNullOrEmpty(CurrentDbDir))
-            return Path.Combine(CurrentDbDir, FilesFolderName);
-        return primary;
+        if (string.IsNullOrEmpty(text) || text.IndexOf('%') < 0) return text;
+        try { return Uri.UnescapeDataString(text); }
+        catch { return text; }
     }
 
-    private static bool IsDirWritable(string dir)
+    public static bool IsLocalFilesReference(string? rawUrl)
+    {
+        return TryNormalizeRelFilePath(rawUrl, out _);
+    }
+
+    public static bool TryNormalizeRelFilePath(string? rawUrl, out string normalizedRel)
+    {
+        normalizedRel = "";
+        if (string.IsNullOrWhiteSpace(rawUrl)) return false;
+
+        var clean = SafeUnescape(rawUrl!.Trim().Trim('<', '>')).Replace('\\', '/');
+        while (clean.StartsWith("./", StringComparison.Ordinal))
+            clean = clean.Substring(2);
+        clean = clean.TrimStart('/');
+
+        if (!clean.StartsWith(FilesFolderName + "/", StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        var sub = clean.Substring(FilesFolderName.Length + 1);
+        if (string.IsNullOrWhiteSpace(sub)) return false;
+
+        var parts = sub.Split('/');
+        foreach (var part in parts)
+        {
+            if (part == ".." || part == ".") return false;
+        }
+
+        normalizedRel = FilesFolderName + "/" + sub;
+        return true;
+    }
+
+    public string GetTargetFilesDir()
+    {
+        if (!string.IsNullOrEmpty(CurrentDbDir) && IsDirWritableCached(CurrentDbDir!))
+            return Path.Combine(CurrentDbDir!, FilesFolderName);
+
+        if (IsDirWritableCached(AppBaseDir))
+            return Path.Combine(AppBaseDir, FilesFolderName);
+
+        return !string.IsNullOrEmpty(CurrentDbDir)
+            ? Path.Combine(CurrentDbDir!, FilesFolderName)
+            : Path.Combine(AppBaseDir, FilesFolderName);
+    }
+
+    private bool IsDirWritableCached(string dir)
+    {
+        if (_writabilityCache.TryGetValue(dir, out var cached)) return cached;
+        bool ok = ProbeDirWritable(dir);
+        _writabilityCache[dir] = ok;
+        return ok;
+    }
+
+    private static bool ProbeDirWritable(string dir)
     {
         try
         {
+            if (!Directory.Exists(dir)) return false;
             var probe = Path.Combine(dir, ".ll_probe_" + Guid.NewGuid().ToString("N"));
             File.WriteAllBytes(probe, Array.Empty<byte>());
             File.Delete(probe);
@@ -271,25 +389,32 @@ public sealed class FileArchiveService
 
     public string? ResolveExistingFile(string rawUrl)
     {
-        if (string.IsNullOrWhiteSpace(rawUrl)) return null;
-        var decoded = Uri.UnescapeDataString(rawUrl.Trim().Trim('<', '>'));
-        var clean = decoded.Replace('\\', '/').TrimStart('/');
-        if (clean.StartsWith("./", StringComparison.Ordinal))
-            clean = clean.Substring(2);
-        if (clean.StartsWith(FilesFolderName + "/", StringComparison.OrdinalIgnoreCase))
-            clean = clean.Substring(FilesFolderName.Length + 1);
-        if (string.IsNullOrWhiteSpace(clean) || clean.Contains("..")) return null;
-
-        var nativeRel = clean.Replace('/', Path.DirectorySeparatorChar);
-        var p1 = Path.Combine(GetTargetFilesDir(), nativeRel);
-        if (File.Exists(p1)) return p1;
+        if (!TryNormalizeRelFilePath(rawUrl, out var normRel)) return null;
+        var sub = normRel.Substring(FilesFolderName.Length + 1).Replace('/', Path.DirectorySeparatorChar);
 
         if (!string.IsNullOrEmpty(CurrentDbDir))
         {
-            var p2 = Path.Combine(CurrentDbDir, FilesFolderName, nativeRel);
-            if (File.Exists(p2)) return p2;
+            var dbCandidate = Path.Combine(CurrentDbDir!, FilesFolderName, sub);
+            if (IsPathInsideRoot(dbCandidate, Path.Combine(CurrentDbDir!, FilesFolderName)) && File.Exists(dbCandidate))
+                return dbCandidate;
         }
+
+        var appCandidate = Path.Combine(AppBaseDir, FilesFolderName, sub);
+        if (IsPathInsideRoot(appCandidate, Path.Combine(AppBaseDir, FilesFolderName)) && File.Exists(appCandidate))
+            return appCandidate;
+
         return null;
+    }
+
+    private static bool IsPathInsideRoot(string filePath, string rootDir)
+    {
+        try
+        {
+            var fullFile = Path.GetFullPath(filePath);
+            var fullRoot = Path.GetFullPath(rootDir).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+            return fullFile.StartsWith(fullRoot, StringComparison.OrdinalIgnoreCase);
+        }
+        catch { return false; }
     }
 
     private static string SanitizeFileName(string name)
@@ -298,7 +423,7 @@ public sealed class FileArchiveService
         if (string.IsNullOrWhiteSpace(baseName)) baseName = "file";
         var invalid = Path.GetInvalidFileNameChars();
         return new string(baseName.Select(c =>
-            invalid.Contains(c) || c == ' ' || c == '(' || c == ')' || c == '[' || c == ']' ? '_' : c).ToArray());
+            invalid.Contains(c) || c == ' ' || c == '(' || c == ')' || c == '[' || c == ']' || c == '%' ? '_' : c).ToArray());
     }
 
     private static string MakeUniqueStoredName(string safeName) =>
@@ -372,42 +497,21 @@ public sealed class FileArchiveService
         {
             var label = m.Groups[1].Value;
             var rawTarget = m.Groups[2].Value.Trim();
-            var pathOnly = rawTarget;
-            var suffix = "";
-
-            if (rawTarget.StartsWith("<"))
-            {
-                int endAngle = rawTarget.IndexOf('>');
-                if (endAngle > 1)
-                {
-                    pathOnly = rawTarget.Substring(1, endAngle - 1);
-                    suffix = rawTarget.Substring(endAngle + 1);
-                }
-            }
-            else
-            {
-                int quoteIdx = rawTarget.IndexOf(" \"", StringComparison.Ordinal);
-                if (quoteIdx > 0)
-                {
-                    pathOnly = rawTarget.Substring(0, quoteIdx);
-                    suffix = rawTarget.Substring(quoteIdx);
-                }
-            }
+            var (pathOnly, suffix) = SplitMarkdownTarget(rawTarget);
 
             if (string.IsNullOrWhiteSpace(pathOnly) ||
                 pathOnly.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
                 pathOnly.StartsWith("https://", StringComparison.OrdinalIgnoreCase) ||
                 pathOnly.StartsWith("mailto:", StringComparison.OrdinalIgnoreCase) ||
                 pathOnly.StartsWith("#", StringComparison.Ordinal) ||
-                pathOnly.StartsWith("files/", StringComparison.OrdinalIgnoreCase) ||
-                pathOnly.StartsWith("/files/", StringComparison.OrdinalIgnoreCase))
+                IsLocalFilesReference(pathOnly))
             {
                 return m.Value;
             }
 
             try
             {
-                var res = ImportExternalFile(Uri.UnescapeDataString(pathOnly));
+                var res = ImportExternalFile(SafeUnescape(pathOnly));
                 count++;
                 return $"{label}({res.RelPath}{suffix})";
             }
@@ -416,26 +520,111 @@ public sealed class FileArchiveService
         return (rewritten, count);
     }
 
+    public static string NormalizeExportMarkdownFileLinks(string markdownContent)
+    {
+        if (string.IsNullOrEmpty(markdownContent)) return markdownContent;
+
+        var step1 = MdLinkRegex.Replace(markdownContent, m =>
+        {
+            var label = m.Groups[1].Value;
+            var rawTarget = m.Groups[2].Value.Trim();
+            var (pathOnly, suffix) = SplitMarkdownTarget(rawTarget);
+            if (TryNormalizeRelFilePath(pathOnly, out var normRel))
+                return $"{label}({normRel}{suffix})";
+            return m.Value;
+        });
+
+        return HtmlImgRegex.Replace(step1, m =>
+        {
+            var rawSrc = m.Groups[1].Value;
+            if (TryNormalizeRelFilePath(rawSrc, out var normRel))
+                return m.Value.Replace(rawSrc, normRel);
+            return m.Value;
+        });
+    }
+
+    private static (string PathOnly, string Suffix) SplitMarkdownTarget(string rawTarget)
+    {
+        if (rawTarget.StartsWith("<", StringComparison.Ordinal))
+        {
+            int endAngle = rawTarget.IndexOf('>');
+            if (endAngle > 1)
+                return (rawTarget.Substring(1, endAngle - 1), rawTarget.Substring(endAngle + 1));
+        }
+
+        int dq = rawTarget.IndexOf(" \"", StringComparison.Ordinal);
+        if (dq > 0) return (rawTarget.Substring(0, dq), rawTarget.Substring(dq));
+
+        int sq = rawTarget.IndexOf(" '", StringComparison.Ordinal);
+        if (sq > 0) return (rawTarget.Substring(0, sq), rawTarget.Substring(sq));
+
+        return (rawTarget, "");
+    }
+
     public List<string> ExtractReferencedRelPaths(string markdownContent)
     {
         var list = new List<string>();
         if (string.IsNullOrEmpty(markdownContent)) return list;
+
         foreach (Match m in MdLinkRegex.Matches(markdownContent))
         {
-            var target = Uri.UnescapeDataString(m.Groups[2].Value.Trim());
-            var sq = target.IndexOf(" \"", StringComparison.Ordinal);
-            if (sq > 0) target = target.Substring(0, sq);
-            target = target.Trim('<', '>').Replace('\\', '/').TrimStart('/');
-            if (target.StartsWith(FilesFolderName + "/", StringComparison.OrdinalIgnoreCase))
-                list.Add(target);
+            var (pathOnly, _) = SplitMarkdownTarget(m.Groups[2].Value.Trim());
+            if (TryNormalizeRelFilePath(pathOnly, out var normRel))
+                list.Add(normRel);
         }
         foreach (Match m in HtmlImgRegex.Matches(markdownContent))
         {
-            var target = Uri.UnescapeDataString(m.Groups[1].Value.Trim()).Replace('\\', '/').TrimStart('/');
-            if (target.StartsWith(FilesFolderName + "/", StringComparison.OrdinalIgnoreCase))
-                list.Add(target);
+            if (TryNormalizeRelFilePath(m.Groups[1].Value, out var normRel))
+                list.Add(normRel);
         }
         return list.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
+    public OrphanScanResult ScanOrphanFiles(IEnumerable<string> allNodeContents)
+    {
+        var targetDir = GetTargetFilesDir();
+        var result = new OrphanScanResult { TargetDir = targetDir };
+        if (!Directory.Exists(targetDir)) return result;
+
+        var referencedFullPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var content in allNodeContents)
+        {
+            foreach (var rel in ExtractReferencedRelPaths(content))
+            {
+                var sub = rel.Substring(FilesFolderName.Length + 1).Replace('/', Path.DirectorySeparatorChar);
+                var candidate = Path.GetFullPath(Path.Combine(targetDir, sub));
+                referencedFullPaths.Add(candidate);
+            }
+        }
+
+        foreach (var file in Directory.EnumerateFiles(targetDir, "*", SearchOption.AllDirectories))
+        {
+            var full = Path.GetFullPath(file);
+            if (!referencedFullPaths.Contains(full))
+            {
+                result.FilePaths.Add(full);
+                try { result.TotalBytes += new FileInfo(full).Length; } catch { }
+            }
+        }
+        return result;
+    }
+
+    public int DeleteOrphanFiles(IEnumerable<string> filePaths)
+    {
+        int deleted = 0;
+        foreach (var p in filePaths)
+        {
+            try
+            {
+                if (File.Exists(p))
+                {
+                    File.Delete(p);
+                    deleted++;
+                }
+            }
+            catch { }
+        }
+        return deleted;
     }
 }
 
@@ -463,7 +652,12 @@ public sealed class DatabaseService : IDisposable
     public void OpenOrCreate(string filePath)
     {
         var fullPath = Path.GetFullPath(filePath);
-        Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
+        if (Directory.Exists(fullPath))
+            throw new InvalidOperationException("目标路径是一个文件夹，而不是有效的 .llist 笔记库文件。");
+
+        var parentDir = Path.GetDirectoryName(fullPath);
+        if (!string.IsNullOrEmpty(parentDir))
+            Directory.CreateDirectory(parentDir);
 
         var isNew = !File.Exists(fullPath) || new FileInfo(fullPath).Length == 0;
         var connStr = new SqliteConnectionStringBuilder { DataSource = fullPath, Pooling = false }.ToString();
@@ -527,7 +721,7 @@ public sealed class DatabaseService : IDisposable
                 using var ins = conn.CreateCommand();
                 ins.CommandText = "INSERT INTO nodes (parent_id, title, content, sort_order, is_expanded) VALUES (NULL, $t, $c, 1000.0, 1);";
                 ins.Parameters.AddWithValue("$t", "我的第一篇笔记");
-                ins.Parameters.AddWithValue("$c", "# 我的第一篇笔记\n\n点击「编辑」或按 Ctrl+E 开始编写你的 Markdown 内容。\n\n- 拖入或粘贴图片/附件将自动存入程序目录下的 files/ 文件夹\n- [ ] 待办事项示例");
+                ins.Parameters.AddWithValue("$c", "# 我的第一篇笔记\n\n点击「编辑」或按 Ctrl+E 开始编写你的 Markdown 内容。\n\n- 拖入或粘贴图片/附件将自动存入数据库同级目录下的 files/ 文件夹\n- [ ] 待办事项示例");
                 ins.ExecuteNonQuery();
             }
         }
@@ -537,9 +731,10 @@ public sealed class DatabaseService : IDisposable
         }
     }
 
-    private static void ExecNonQuery(SqliteConnection conn, string sql)
+    private static void ExecNonQuery(SqliteConnection conn, string sql, SqliteTransaction? tx = null)
     {
         using var cmd = conn.CreateCommand();
+        cmd.Transaction = tx;
         cmd.CommandText = sql;
         cmd.ExecuteNonQuery();
     }
@@ -617,6 +812,17 @@ public sealed class DatabaseService : IDisposable
         return list;
     }
 
+    public List<string> GetAllNodeContents()
+    {
+        var conn = RequireConn();
+        var list = new List<string>();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT content FROM nodes WHERE content IS NOT NULL AND content != '';";
+        using var r = cmd.ExecuteReader();
+        while (r.Read()) list.Add(r.GetString(0));
+        return list;
+    }
+
     public NodeDetail GetNodeContent(long id)
     {
         var conn = RequireConn();
@@ -633,11 +839,16 @@ public sealed class DatabaseService : IDisposable
         var conn = RequireConn();
         if (string.IsNullOrWhiteSpace(title)) title = "未命名节点";
 
+        using var tx = conn.BeginTransaction();
         double order;
-        if (exactSortOrder.HasValue) order = exactSortOrder.Value;
+        if (exactSortOrder.HasValue)
+        {
+            order = exactSortOrder.Value;
+        }
         else
         {
             using var maxCmd = conn.CreateCommand();
+            maxCmd.Transaction = tx;
             maxCmd.CommandText = parentId <= 0
                 ? "SELECT MAX(sort_order) FROM nodes WHERE parent_id IS NULL;"
                 : "SELECT MAX(sort_order) FROM nodes WHERE parent_id = $pid;";
@@ -645,15 +856,28 @@ public sealed class DatabaseService : IDisposable
             order = maxCmd.ExecuteScalar() is double d ? d + 1000.0 : 1000.0;
         }
 
-        using var cmd = conn.CreateCommand();
-        cmd.CommandText = "INSERT INTO nodes (parent_id, title, content, sort_order, is_expanded) VALUES ($pid, $title, '', $order, 1); SELECT last_insert_rowid();";
-        cmd.Parameters.AddWithValue("$pid", parentId <= 0 ? DBNull.Value : (object)parentId);
-        cmd.Parameters.AddWithValue("$title", title);
-        cmd.Parameters.AddWithValue("$order", order);
-        var newId = Convert.ToInt64(cmd.ExecuteScalar()!);
+        long newId;
+        using (var cmd = conn.CreateCommand())
+        {
+            cmd.Transaction = tx;
+            cmd.CommandText = "INSERT INTO nodes (parent_id, title, content, sort_order, is_expanded) VALUES ($pid, $title, '', $order, 1); SELECT last_insert_rowid();";
+            cmd.Parameters.AddWithValue("$pid", parentId <= 0 ? DBNull.Value : (object)parentId);
+            cmd.Parameters.AddWithValue("$title", title);
+            cmd.Parameters.AddWithValue("$order", order);
+            newId = Convert.ToInt64(cmd.ExecuteScalar()!);
+        }
 
-        if (parentId > 0) SetNodeExpanded(parentId, true);
-        MaybeRebalance(parentId);
+        if (parentId > 0)
+        {
+            using var expCmd = conn.CreateCommand();
+            expCmd.Transaction = tx;
+            expCmd.CommandText = "UPDATE nodes SET is_expanded = 1 WHERE id = $id;";
+            expCmd.Parameters.AddWithValue("$id", parentId);
+            expCmd.ExecuteNonQuery();
+        }
+
+        MaybeRebalanceInTx(conn, tx, parentId);
+        tx.Commit();
         HasModificationsSinceOpen = true;
         return GetTreeNodeById(newId);
     }
@@ -665,7 +889,7 @@ public sealed class DatabaseService : IDisposable
         cmd.CommandText = "SELECT id, COALESCE(parent_id, 0), title, sort_order, is_expanded, updated_at FROM nodes WHERE id = $id;";
         cmd.Parameters.AddWithValue("$id", id);
         using var r = cmd.ExecuteReader();
-        r.Read();
+        if (!r.Read()) throw new KeyNotFoundException($"节点 {id} 不存在");
         return new NodeRecord { Id = r.GetInt64(0), ParentId = r.GetInt64(1), Title = r.GetString(2), SortOrder = r.GetDouble(3), IsExpanded = r.GetInt64(4) != 0, UpdatedAt = r.GetString(5) };
     }
 
@@ -726,15 +950,29 @@ public sealed class DatabaseService : IDisposable
             if (Convert.ToInt64(chk.ExecuteScalar() ?? 0L) > 0)
                 throw new InvalidOperationException("不能将父节点移动到其子节点内部");
         }
-        using var cmd = conn.CreateCommand();
-        cmd.CommandText = "UPDATE nodes SET parent_id = $np, sort_order = $so, updated_at = CURRENT_TIMESTAMP WHERE id = $id;";
-        cmd.Parameters.AddWithValue("$np", newParentId <= 0 ? DBNull.Value : (object)newParentId);
-        cmd.Parameters.AddWithValue("$so", newSortOrder);
-        cmd.Parameters.AddWithValue("$id", id);
-        cmd.ExecuteNonQuery();
 
-        if (newParentId > 0) SetNodeExpanded(newParentId, true);
-        MaybeRebalance(newParentId);
+        using var tx = conn.BeginTransaction();
+        using (var cmd = conn.CreateCommand())
+        {
+            cmd.Transaction = tx;
+            cmd.CommandText = "UPDATE nodes SET parent_id = $np, sort_order = $so, updated_at = CURRENT_TIMESTAMP WHERE id = $id;";
+            cmd.Parameters.AddWithValue("$np", newParentId <= 0 ? DBNull.Value : (object)newParentId);
+            cmd.Parameters.AddWithValue("$so", newSortOrder);
+            cmd.Parameters.AddWithValue("$id", id);
+            cmd.ExecuteNonQuery();
+        }
+
+        if (newParentId > 0)
+        {
+            using var expCmd = conn.CreateCommand();
+            expCmd.Transaction = tx;
+            expCmd.CommandText = "UPDATE nodes SET is_expanded = 1 WHERE id = $id;";
+            expCmd.Parameters.AddWithValue("$id", newParentId);
+            expCmd.ExecuteNonQuery();
+        }
+
+        MaybeRebalanceInTx(conn, tx, newParentId);
+        tx.Commit();
         HasModificationsSinceOpen = true;
     }
 
@@ -743,15 +981,19 @@ public sealed class DatabaseService : IDisposable
         var conn = RequireConn();
         var src = GetTreeNodeById(id);
 
-        using var nextCmd = conn.CreateCommand();
-        nextCmd.CommandText = src.ParentId <= 0
-            ? "SELECT MIN(sort_order) FROM nodes WHERE parent_id IS NULL AND sort_order > $so;"
-            : "SELECT MIN(sort_order) FROM nodes WHERE parent_id = $pid AND sort_order > $so;";
-        if (src.ParentId > 0) nextCmd.Parameters.AddWithValue("$pid", src.ParentId);
-        nextCmd.Parameters.AddWithValue("$so", src.SortOrder);
-        var newOrder = nextCmd.ExecuteScalar() is double d ? (src.SortOrder + d) / 2.0 : src.SortOrder + 1000.0;
-
         using var tx = conn.BeginTransaction();
+        double newOrder;
+        using (var nextCmd = conn.CreateCommand())
+        {
+            nextCmd.Transaction = tx;
+            nextCmd.CommandText = src.ParentId <= 0
+                ? "SELECT MIN(sort_order) FROM nodes WHERE parent_id IS NULL AND sort_order > $so;"
+                : "SELECT MIN(sort_order) FROM nodes WHERE parent_id = $pid AND sort_order > $so;";
+            if (src.ParentId > 0) nextCmd.Parameters.AddWithValue("$pid", src.ParentId);
+            nextCmd.Parameters.AddWithValue("$so", src.SortOrder);
+            newOrder = nextCmd.ExecuteScalar() is double d ? (src.SortOrder + d) / 2.0 : src.SortOrder + 1000.0;
+        }
+
         long CloneBranch(long oldId, long targetPid, double order, bool rename)
         {
             string t, c; long exp;
@@ -793,8 +1035,8 @@ public sealed class DatabaseService : IDisposable
         }
 
         var newRootId = CloneBranch(id, src.ParentId, newOrder, true);
+        MaybeRebalanceInTx(conn, tx, src.ParentId);
         tx.Commit();
-        MaybeRebalance(src.ParentId);
         HasModificationsSinceOpen = true;
         return GetTreeNodeById(newRootId);
     }
@@ -836,13 +1078,13 @@ public sealed class DatabaseService : IDisposable
         HasModificationsSinceOpen = true;
     }
 
-    private void MaybeRebalance(long parentId)
+    private static void MaybeRebalanceInTx(SqliteConnection conn, SqliteTransaction tx, long parentId)
     {
-        var conn = RequireConn();
         var items = new List<(long Id, double Order)>();
         bool need = false;
         using (var cmd = conn.CreateCommand())
         {
+            cmd.Transaction = tx;
             cmd.CommandText = parentId <= 0
                 ? "SELECT id, sort_order FROM nodes WHERE parent_id IS NULL ORDER BY sort_order ASC, id ASC;"
                 : "SELECT id, sort_order FROM nodes WHERE parent_id = $pid ORDER BY sort_order ASC, id ASC;";
@@ -856,7 +1098,6 @@ public sealed class DatabaseService : IDisposable
             }
         }
         if (!need) return;
-        using var tx = conn.BeginTransaction();
         for (int i = 0; i < items.Count; i++)
         {
             using var u = conn.CreateCommand();
@@ -866,10 +1107,20 @@ public sealed class DatabaseService : IDisposable
             u.Parameters.AddWithValue("$id", items[i].Id);
             u.ExecuteNonQuery();
         }
-        tx.Commit();
     }
 
-    public List<SearchHit> SearchOccurrences(string keyword, int maxHits = 500)
+    public static string[] SplitLinesNormalized(string content)
+    {
+        if (string.IsNullOrEmpty(content)) return Array.Empty<string>();
+        return content.Replace("\r\n", "\n").Replace("\r", "\n").Split('\n');
+    }
+
+    public List<SearchHit> SearchOccurrences(
+        string keyword,
+        int maxHits = 500,
+        long? overrideNodeId = null,
+        string? overrideTitle = null,
+        string? overrideContent = null)
     {
         var conn = RequireConn();
         var kw = keyword.Trim();
@@ -881,35 +1132,27 @@ public sealed class DatabaseService : IDisposable
         {
             var parts = new List<string>();
             if (!map.TryGetValue(id, out var cur)) return "";
+            var visited = new HashSet<long> { id };
             int guard = 0;
             while (cur != null && cur.ParentId > 0 && guard++ < 50 && map.TryGetValue(cur.ParentId, out var p))
             {
+                if (!visited.Add(p.Id)) break;
                 parts.Insert(0, p.Title);
                 cur = p;
             }
             return string.Join(" / ", parts);
         }
 
-        var escaped = kw.Replace(@"\", @"\\").Replace("%", @"\%").Replace("_", @"\_");
-        using var cmd = conn.CreateCommand();
-        cmd.CommandText = "SELECT id, title, content FROM nodes WHERE title LIKE $pat ESCAPE '\\' OR content LIKE $pat ESCAPE '\\' ORDER BY sort_order ASC, id ASC;";
-        cmd.Parameters.AddWithValue("$pat", $"%{escaped}%");
-
-        using var r = cmd.ExecuteReader();
-        while (r.Read() && hits.Count < maxHits)
+        void CollectNodeHits(long id, string title, string content)
         {
-            var id = r.GetInt64(0);
-            var title = r.GetString(1);
-            var content = r.GetString(2);
             var path = BuildPath(id);
-
-            if (title.IndexOf(kw, StringComparison.OrdinalIgnoreCase) >= 0)
+            if (title.IndexOf(kw, StringComparison.OrdinalIgnoreCase) >= 0 && hits.Count < maxHits)
             {
                 hits.Add(new SearchHit { NodeId = id, NodeTitle = title, Breadcrumb = path, LineNumber = 0, Snippet = "[命中标题] " + title });
             }
-            if (!string.IsNullOrEmpty(content))
+            if (!string.IsNullOrEmpty(content) && hits.Count < maxHits)
             {
-                var lines = content.Replace("\r\n", "\n").Split('\n');
+                var lines = SplitLinesNormalized(content);
                 for (int i = 0; i < lines.Length && hits.Count < maxHits; i++)
                 {
                     var line = lines[i];
@@ -934,6 +1177,29 @@ public sealed class DatabaseService : IDisposable
                 }
             }
         }
+
+        // 优先检索内存中尚未保存的当前节点，避免未保存改动导致跳转行号错位
+        if (overrideNodeId.HasValue && overrideNodeId.Value > 0 && overrideTitle != null && overrideContent != null)
+        {
+            if (overrideTitle.IndexOf(kw, StringComparison.OrdinalIgnoreCase) >= 0 ||
+                overrideContent.IndexOf(kw, StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                CollectNodeHits(overrideNodeId.Value, overrideTitle, overrideContent);
+            }
+        }
+
+        var escaped = kw.Replace(@"\", @"\\").Replace("%", @"\%").Replace("_", @"\_");
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT id, title, content FROM nodes WHERE title LIKE $pat ESCAPE '\\' OR content LIKE $pat ESCAPE '\\' ORDER BY sort_order ASC, id ASC;";
+        cmd.Parameters.AddWithValue("$pat", $"%{escaped}%");
+
+        using var r = cmd.ExecuteReader();
+        while (r.Read() && hits.Count < maxHits)
+        {
+            var id = r.GetInt64(0);
+            if (overrideNodeId.HasValue && id == overrideNodeId.Value) continue;
+            CollectNodeHits(id, r.GetString(1), r.GetString(2));
+        }
         return hits;
     }
 
@@ -947,11 +1213,7 @@ public sealed class DatabaseService : IDisposable
         if (targetNodeId.HasValue && !includeChildren)
         {
             var detail = GetNodeContent(targetNodeId.Value);
-            sb.Append("# ").AppendLine(detail.Title).AppendLine();
-            if (!string.IsNullOrWhiteSpace(detail.Content))
-                sb.AppendLine(detail.Content.TrimEnd()).AppendLine();
-            foreach (var f in fileArchive.ExtractReferencedRelPaths(detail.Content))
-                referencedFiles.Add(f);
+            WriteNodeSection(sb, detail.Title, detail.Content, 0, fileArchive, referencedFiles);
         }
         else
         {
@@ -970,12 +1232,7 @@ public sealed class DatabaseService : IDisposable
 
             void WriteItem(long id, string title, string content, int depth)
             {
-                sb.Append(new string('#', Math.Max(1, Math.Min(6, depth + 1)))).Append(' ').AppendLine(title).AppendLine();
-                if (!string.IsNullOrWhiteSpace(content))
-                {
-                    sb.AppendLine(content.TrimEnd()).AppendLine();
-                    foreach (var f in fileArchive.ExtractReferencedRelPaths(content)) referencedFiles.Add(f);
-                }
+                WriteNodeSection(sb, title, content, depth, fileArchive, referencedFiles);
                 if (all.TryGetValue(id, out var kids))
                     foreach (var k in kids) WriteItem(k.Id, k.Title, k.Content, depth + 1);
             }
@@ -997,10 +1254,10 @@ public sealed class DatabaseService : IDisposable
             {
                 var src = fileArchive.ResolveExistingFile(rel);
                 if (src == null) continue;
-                var fileName = rel.StartsWith(FileArchiveService.FilesFolderName + "/", StringComparison.OrdinalIgnoreCase)
+                var sub = rel.StartsWith(FileArchiveService.FilesFolderName + "/", StringComparison.OrdinalIgnoreCase)
                     ? rel.Substring(FileArchiveService.FilesFolderName.Length + 1)
                     : Path.GetFileName(src);
-                var dst = Path.Combine(exportFilesDir, fileName.Replace('/', Path.DirectorySeparatorChar));
+                var dst = Path.Combine(exportFilesDir, sub.Replace('/', Path.DirectorySeparatorChar));
                 Directory.CreateDirectory(Path.GetDirectoryName(dst)!);
                 if (!string.Equals(Path.GetFullPath(src), Path.GetFullPath(dst), StringComparison.OrdinalIgnoreCase))
                 {
@@ -1012,16 +1269,120 @@ public sealed class DatabaseService : IDisposable
         return copiedCount;
     }
 
+    private static void WriteNodeSection(
+        StringBuilder sb,
+        string title,
+        string rawContent,
+        int depth,
+        FileArchiveService fileArchive,
+        HashSet<string> referencedFiles)
+    {
+        int nodeLevel = Math.Max(1, Math.Min(6, depth + 1));
+        sb.Append(new string('#', nodeLevel)).Append(' ').AppendLine(title).AppendLine();
+
+        if (!string.IsNullOrWhiteSpace(rawContent))
+        {
+            var normalized = FileArchiveService.NormalizeExportMarkdownFileLinks(rawContent.TrimEnd());
+            foreach (var f in fileArchive.ExtractReferencedRelPaths(normalized))
+                referencedFiles.Add(f);
+
+            var lines = SplitLinesNormalized(normalized);
+            int startIdx = 0;
+            // 若正文首行本身就是与节点同名的 H1 标题，导出时自动去重
+            while (startIdx < lines.Length && string.IsNullOrWhiteSpace(lines[startIdx])) startIdx++;
+            if (startIdx < lines.Length)
+            {
+                var firstTrim = lines[startIdx].Trim();
+                if (firstTrim.StartsWith("# ", StringComparison.Ordinal) &&
+                    string.Equals(firstTrim.Substring(2).Trim(), title.Trim(), StringComparison.OrdinalIgnoreCase))
+                {
+                    startIdx++;
+                    while (startIdx < lines.Length && string.IsNullOrWhiteSpace(lines[startIdx])) startIdx++;
+                }
+            }
+
+            bool inFence = false;
+            string fenceChar = "";
+            int fenceLen = 0;
+            for (int i = startIdx; i < lines.Length; i++)
+            {
+                var line = lines[i];
+                var trimmed = line.TrimStart();
+                if (TryParseFenceLine(trimmed, out var fc, out var fl))
+                {
+                    if (!inFence) { inFence = true; fenceChar = fc; fenceLen = fl; }
+                    else if (fc == fenceChar && fl >= fenceLen && trimmed.TrimEnd().Length == fl)
+                    {
+                        inFence = false;
+                    }
+                    sb.AppendLine(line);
+                    continue;
+                }
+
+                if (!inFence && depth > 0 && trimmed.StartsWith("#", StringComparison.Ordinal))
+                {
+                    int h = 0;
+                    while (h < trimmed.Length && trimmed[h] == '#') h++;
+                    if (h >= 1 && h <= 6 && (h == trimmed.Length || trimmed[h] == ' '))
+                    {
+                        int shifted = Math.Min(6, h + depth);
+                        int indentCount = line.Length - trimmed.Length;
+                        sb.Append(line, 0, indentCount)
+                          .Append('#', shifted)
+                          .AppendLine(trimmed.Substring(h));
+                        continue;
+                    }
+                }
+                sb.AppendLine(line);
+            }
+            sb.AppendLine();
+        }
+    }
+
+    private static bool TryParseFenceLine(string trimmed, out string fenceChar, out int fenceLen)
+    {
+        fenceChar = "";
+        fenceLen = 0;
+        if (trimmed.Length < 3) return false;
+        char ch = trimmed[0];
+        if (ch != '`' && ch != '~') return false;
+        int len = 0;
+        while (len < trimmed.Length && trimmed[len] == ch) len++;
+        if (len < 3) return false;
+        if (ch == '`' && trimmed.IndexOf('`', len) >= 0) return false;
+        fenceChar = ch.ToString();
+        fenceLen = len;
+        return true;
+    }
+
     public void SmartVacuumIfNeeded()
     {
         if (_conn == null) return;
         try
         {
-            using var cmd = _conn.CreateCommand();
-            cmd.CommandText = "PRAGMA freelist_count;";
-            var freePages = Convert.ToInt64(cmd.ExecuteScalar() ?? 0L);
-            if (freePages > 0 || HasModificationsSinceOpen)
+            long freePages, pageCount, autoVacuumMode;
+            using (var cmd = _conn.CreateCommand())
+            {
+                cmd.CommandText = "PRAGMA freelist_count;";
+                freePages = Convert.ToInt64(cmd.ExecuteScalar() ?? 0L);
+                cmd.CommandText = "PRAGMA page_count;";
+                pageCount = Math.Max(1L, Convert.ToInt64(cmd.ExecuteScalar() ?? 1L));
+                cmd.CommandText = "PRAGMA auto_vacuum;";
+                autoVacuumMode = Convert.ToInt64(cmd.ExecuteScalar() ?? 0L);
+            }
+
+            if (freePages <= 0) return;
+
+            double ratio = (double)freePages / pageCount;
+            if (autoVacuumMode == 2 && (freePages >= 32 || ratio >= 0.10))
+            {
+                // 增量清理空闲页，避免在主线程阻塞重写整库
+                ExecNonQuery(_conn, "PRAGMA incremental_vacuum;");
+            }
+            else if (ratio >= 0.25 && freePages >= 128)
+            {
                 ExecNonQuery(_conn, "VACUUM;");
+            }
         }
         catch { }
     }
