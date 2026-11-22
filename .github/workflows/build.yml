@@ -1,4 +1,4 @@
-name: Build LiteList
+name: Build LiteList Win10
 
 on:
   push:
@@ -7,92 +7,46 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            platform: windows/amd64
-            extra_flags: ""
-            artifact_name: LiteList-windows-amd64
-          - os: ubuntu-latest
-            platform: linux/amd64
-            extra_flags: "-tags webkit2_41"
-            artifact_name: LiteList-linux-amd64
-          - os: macos-latest
-            platform: darwin/universal
-            extra_flags: ""
-            artifact_name: LiteList-macos-universal
-
-    runs-on: ${{ matrix.os }}
+  build-win10:
+    runs-on: windows-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Go
-        uses: actions/setup-go@v5
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
         with:
-          go-version: "1.23"
+          dotnet-version: "8.0.x"
 
-      - name: Setup Node.js (for bundling CM6 & Highlight.js)
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-
-      - name: Install Linux GTK/WebKit Dependencies
-        if: matrix.platform == 'linux/amd64'
+      - name: Publish Single-File Portable EXE
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev
+          dotnet publish LiteList.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o publish-out
 
-      - name: Build Frontend Bundle
+      - name: Package Artifact
+        shell: pwsh
         run: |
-          npm install --no-audit --no-fund
-          npm run build
-
-      - name: Install Wails CLI & Sync Go Dependencies
-        run: |
-          go install github.com/wailsapp/wails/v2/cmd/wails@v2.10.2
-          echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
-          go mod tidy
-
-      - name: Build Binary
-        run: |
-          wails build -s -clean -platform ${{ matrix.platform }} ${{ matrix.extra_flags }}
-
-      - name: Package Artifacts
-        shell: bash
-        run: |
-          mkdir -p dist
-          if [[ "${{ matrix.platform }}" == "windows/amd64" ]]; then
-            cp build/bin/LiteList.exe dist/LiteList-windows-amd64.exe
-          elif [[ "${{ matrix.platform }}" == "linux/amd64" ]]; then
-            cp build/bin/LiteList dist/LiteList-linux-amd64
-            chmod +x dist/LiteList-linux-amd64
-          elif [[ "${{ matrix.platform }}" == "darwin/universal" ]]; then
-            ditto -c -k --sequesterRsrc --keepParent build/bin/LiteList.app dist/LiteList-macos-universal.zip
-          fi
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item "publish-out/LiteList.exe" "dist/LiteList-win10-x64.exe"
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact_name }}
-          path: dist/*
+          name: LiteList-win10-x64
+          path: dist/LiteList-win10-x64.exe
 
   release:
-    needs: build
+    needs: build-win10
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - name: Download All Artifacts
+      - name: Download Artifact
         uses: actions/download-artifact@v4
         with:
+          name: LiteList-win10-x64
           path: release-files
-          merge-multiple: true
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
