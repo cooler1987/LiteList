@@ -64,13 +64,12 @@ public static class AppLogger
 
                 var sb = new StringBuilder();
                 sb.Append('[').Append(DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff"))
-                  .Append("] [").Append(level).Append("] [T").Append(Thread.CurrentThread.ManagedThreadId)
+                  .Append("] [").Append(level)
+                  .Append("] [T").Append(Thread.CurrentThread.ManagedThreadId)
                   .Append("] ").AppendLine(message);
 
                 if (ex != null)
-                {
                     sb.AppendLine(ex.ToString());
-                }
 
                 File.AppendAllText(path, sb.ToString(), new UTF8Encoding(false));
             }
@@ -271,15 +270,6 @@ public static class ThemeHelper
             SetBrush(resources, "StrongColor", "#FAFAFA");
             SetBrush(resources, "ItalicColor", "#C084FC");
             SetBrush(resources, "InlineCodeColor", "#F472B6");
-
-            resources[SystemColors.HighlightBrushKey] = resources["ActiveBg"];
-            resources[SystemColors.HighlightTextBrushKey] = resources["TextFg"];
-            resources[SystemColors.InactiveSelectionHighlightBrushKey] = resources["HoverBg"];
-            resources[SystemColors.InactiveSelectionHighlightTextBrushKey] = resources["TextFg"];
-            resources[SystemColors.WindowBrushKey] = resources["SurfaceBg"];
-            resources[SystemColors.WindowTextBrushKey] = resources["TextFg"];
-            resources[SystemColors.ControlBrushKey] = resources["SurfaceBg"];
-            resources[SystemColors.ControlTextBrushKey] = resources["TextFg"];
         }
         else
         {
@@ -301,16 +291,17 @@ public static class ThemeHelper
             SetBrush(resources, "StrongColor", "#111827");
             SetBrush(resources, "ItalicColor", "#7C3AED");
             SetBrush(resources, "InlineCodeColor", "#BE185D");
-
-            resources[SystemColors.HighlightBrushKey] = resources["ActiveBg"];
-            resources[SystemColors.HighlightTextBrushKey] = resources["TextFg"];
-            resources[SystemColors.InactiveSelectionHighlightBrushKey] = resources["HoverBg"];
-            resources[SystemColors.InactiveSelectionHighlightTextBrushKey] = resources["TextFg"];
-            resources[SystemColors.WindowBrushKey] = resources["SurfaceBg"];
-            resources[SystemColors.WindowTextBrushKey] = resources["TextFg"];
-            resources[SystemColors.ControlBrushKey] = resources["SurfaceBg"];
-            resources[SystemColors.ControlTextBrushKey] = resources["TextFg"];
         }
+
+        resources[SystemColors.HighlightBrushKey] = resources["ActiveBg"];
+        resources[SystemColors.HighlightTextBrushKey] = resources["TextFg"];
+        resources[SystemColors.InactiveSelectionHighlightBrushKey] = resources["HoverBg"];
+        resources[SystemColors.InactiveSelectionHighlightTextBrushKey] = resources["TextFg"];
+        resources[SystemColors.WindowBrushKey] = resources["SurfaceBg"];
+        resources[SystemColors.WindowTextBrushKey] = resources["TextFg"];
+        resources[SystemColors.ControlBrushKey] = resources["SurfaceBg"];
+        resources[SystemColors.ControlTextBrushKey] = resources["TextFg"];
+
         return changed;
     }
 
@@ -344,7 +335,7 @@ public sealed class FileArchiveService
 {
     public const string FilesFolderName = "files";
 
-    // 无嵌套回溯，保证任意超长文档绝对 O(N) 线性匹配
+    // 严格使用线性无回溯正则，避免长文本触发指数级回溯卡死
     private static readonly Regex MdLinkRegex = new(
         @"(!?\[[^\]]*\])\(([^)\r\n]+)\)",
         RegexOptions.Compiled);
@@ -724,7 +715,6 @@ public sealed class DatabaseService : IDisposable
         _conn = newConn;
         CurrentDbPath = fullPath;
         HasModificationsSinceOpen = false;
-        AppLogger.Info($"Database opened: {fullPath}");
     }
 
     private static void InitAndMigrate(SqliteConnection conn, bool isNew)
