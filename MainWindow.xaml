@@ -323,7 +323,7 @@
                     </WrapPanel>
                 </Border>
 
-                <!-- 主体内容区：Scintilla 编辑宿主 与 像素级平滑虚拟化预览列表 -->
+                <!-- 主体内容区：Scintilla 编辑宿主 与 虚拟化预览列表 -->
                 <Grid Grid.Row="3">
                     <wfi:WindowsFormsHost x:Name="EditorHost" Visibility="Collapsed"/>
 
@@ -331,7 +331,7 @@
                              Padding="20,14,20,36"
                              VirtualizingPanel.IsVirtualizing="True"
                              VirtualizingPanel.VirtualizationMode="Standard"
-                             VirtualizingPanel.ScrollUnit="Pixel"
+                             VirtualizingPanel.ScrollUnit="Item"
                              ScrollViewer.CanContentScroll="True"
                              ScrollViewer.HorizontalScrollBarVisibility="Disabled"
                              MouseDoubleClick="PreviewList_MouseDoubleClick"
