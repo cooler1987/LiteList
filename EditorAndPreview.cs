@@ -66,17 +66,17 @@ public sealed class MarkdownScintilla : Scintilla
     private const int SCI_SETFOLDLEVEL = 2222;
     private const int SCI_GETRANGEPOINTER = 2643;
 
+    // 严格线性无回溯正则，确保大文档零卡顿
     private static readonly Regex InlineCodeRegex = new(@"`[^`\r\n]+`", RegexOptions.Compiled);
     private static readonly Regex BoldRegex = new(@"\*\*[^*\r\n]+\*\*", RegexOptions.Compiled);
     private static readonly Regex ItalicRegex = new(@"(?<!\*)\*[^*\s\r\n][^*\r\n]*\*(?!\*)", RegexOptions.Compiled);
     private static readonly Regex StrikeRegex = new(@"~~[^~\r\n]+~~", RegexOptions.Compiled);
-    private static readonly Regex LinkRegex = new(@"!?\[[^\]]*\]\((?:<[^>\r\n]+>|(?:[^()\r\n]|\([^()\r\n]*\))+)\)", RegexOptions.Compiled);
+    private static readonly Regex LinkRegex = new(@"!?\[[^\]]*\]\([^)\r\n]+\)", RegexOptions.Compiled);
     private static readonly Regex TaskPrefixRegex = new(@"^\s*(?:[-*+]|\d+\.)\s+\[[ xX]\]", RegexOptions.Compiled);
     private static readonly Regex CodeKeywordRegex = new(
         @"\b(if|else|for|while|switch|case|return|break|continue|func|function|var|let|const|class|struct|interface|public|private|protected|internal|sealed|readonly|override|virtual|static|void|int|long|double|float|string|bool|true|false|null|nil|None|def|import|from|async|await|new|throw|try|catch|finally|using|namespace|enum|extends|implements|this|self|select|insert|update|delete|create|table)\b",
         RegexOptions.Compiled);
 
-    // 单趟按顺序匹配字符串与注释，避免字符串内的 "https://..." 或 "#fff" 被后置注释正则误覆盖
     private static readonly Regex CodeStringOrCommentRegex = new(
         @"""(?:[^""\\]|\\.)*""|'(?:[^'\\]|\\.)*'|//.*$|--.*$|(?<=^|\s)#(?!include\b|define\b|region\b|endregion\b|if\b|elif\b|else\b|endif\b|pragma\b).*$",
         RegexOptions.Compiled);
@@ -228,7 +228,6 @@ public sealed class MarkdownScintilla : Scintilla
         }
         else if (m.Msg == WM_MOUSEWHEEL && (WF.Control.ModifierKeys & WF.Keys.Control) != 0)
         {
-            // 拦截 Ctrl+滚轮，彻底禁用 Scintilla 原生缩放，避免与 WPF 字号缩放叠加造成双重跳变
             short delta = unchecked((short)((m.WParam.ToInt64() >> 16) & 0xFFFF));
             if (delta != 0) CtrlMouseWheelZoom?.Invoke(delta > 0 ? 1 : -1);
             return;
@@ -268,7 +267,6 @@ public sealed class MarkdownScintilla : Scintilla
         if (curLineIdx <= 0) return;
         var prevLine = Lines[curLineIdx - 1];
 
-        // 处于代码块围栏内时禁止自动续写 Markdown 列表或引用前缀
         if (prevLine.Length > 0)
         {
             int st = GetStyleAt(prevLine.Position);
@@ -295,9 +293,6 @@ public sealed class MarkdownScintilla : Scintilla
         ReplaceSelection(prefix);
     }
 
-    /// <summary>
-    /// 在不清空 Scintilla 撤销缓冲区的前提下局部替换指定行文本
-    /// </summary>
     public void ReplaceLinePreservingUndo(int lineNumber1Based, string newLineContent)
     {
         int lineIdx = lineNumber1Based - 1;
@@ -377,6 +372,7 @@ public sealed class MarkdownScintilla : Scintilla
             if (contentByteLen > 0 && buf[pos + contentByteLen - 1] == (byte)'\n') contentByteLen--;
             if (contentByteLen > 0 && buf[pos + contentByteLen - 1] == (byte)'\r') contentByteLen--;
 
+            // 纯文本快路径：仅对含 Markdown 特征符号的行解码着色，保证几万字大文档毫秒级响应
             bool mayHaveSyntax = insideFence;
             if (!mayHaveSyntax)
             {
@@ -385,7 +381,7 @@ public sealed class MarkdownScintilla : Scintilla
                     byte ch = buf[b];
                     if (ch == (byte)'#' || ch == (byte)'*' || ch == (byte)'`' ||
                         ch == (byte)'~' || ch == (byte)'[' || ch == (byte)'>' ||
-                        ch == (byte)'-' || ch == (byte)'+' || (ch >= (byte)'0' && ch <= (byte)'9'))
+                        ch == (byte)'-' || ch == (byte)'+')
                     {
                         mayHaveSyntax = true;
                         break;
@@ -464,7 +460,7 @@ public sealed class MarkdownScintilla : Scintilla
 
             bool hasInlineMarker = contentText.IndexOfAny(new[] { '*', '`', '~', '[' }) >= 0;
             bool isQuote = trimmed.StartsWith(">", StringComparison.Ordinal);
-            bool hasTask = contentByteLen > 4 && TaskPrefixRegex.IsMatch(contentText);
+            bool hasTask = contentByteLen > 4 && contentText.IndexOf('[') >= 0 && TaskPrefixRegex.IsMatch(contentText);
 
             if (!hasInlineMarker && !isQuote && !hasTask)
             {
@@ -511,7 +507,6 @@ public sealed class MarkdownScintilla : Scintilla
             int runEnd = runStart + 1;
             while (runEnd < charStyles.Length)
             {
-                // 严禁在 UTF-16 代理对中间切断，防止 GetByteCount 统计错误造成字节错位
                 bool insideSurrogatePair = char.IsHighSurrogate(contentChars[runEnd - 1]) &&
                                            char.IsLowSurrogate(contentChars[runEnd]);
                 if (!insideSurrogatePair && charStyles[runEnd] != st) break;
@@ -589,11 +584,16 @@ public sealed class MarkdownScintilla : Scintilla
 
     private static bool IsListOrQuoteLine(string trimmed)
     {
-        return trimmed.StartsWith(">", StringComparison.Ordinal) ||
-               trimmed.StartsWith("- ", StringComparison.Ordinal) ||
-               trimmed.StartsWith("* ", StringComparison.Ordinal) ||
-               trimmed.StartsWith("+ ", StringComparison.Ordinal) ||
-               Regex.IsMatch(trimmed, @"^\d+[.)]\s");
+        if (string.IsNullOrEmpty(trimmed)) return false;
+        if (trimmed.StartsWith(">", StringComparison.Ordinal) ||
+            trimmed.StartsWith("- ", StringComparison.Ordinal) ||
+            trimmed.StartsWith("* ", StringComparison.Ordinal) ||
+            trimmed.StartsWith("+ ", StringComparison.Ordinal))
+            return true;
+
+        int i = 0;
+        while (i < trimmed.Length && char.IsDigit(trimmed[i])) i++;
+        return i > 0 && i + 1 < trimmed.Length && (trimmed[i] == '.' || trimmed[i] == ')') && trimmed[i + 1] == ' ';
     }
 
     public void RebuildFoldLevelsFromText(string fullText)
@@ -641,7 +641,7 @@ public sealed class MarkdownScintilla : Scintilla
                 level = FoldLevelBase + hLvl;
                 flags = FoldHeaderFlag;
             }
-            else if (!string.IsNullOrWhiteSpace(trimmed) && !IsListOrQuoteLine(trimmed) && indent < 4 &&
+            else if (!string.IsNullOrWhiteSpace(trimmed) && indent < 4 && !IsListOrQuoteLine(trimmed) &&
                      i + 1 < maxLines && (lines[i + 1].Length - lines[i + 1].TrimStart().Length) < 4 &&
                      IsSetextUnderline(lines[i + 1].TrimStart(), out int sLvl))
             {
@@ -653,7 +653,7 @@ public sealed class MarkdownScintilla : Scintilla
                 bool isList = trimmed.StartsWith("- ", StringComparison.Ordinal) ||
                               trimmed.StartsWith("* ", StringComparison.Ordinal) ||
                               trimmed.StartsWith("+ ", StringComparison.Ordinal) ||
-                              (trimmed.Length >= 3 && char.IsDigit(trimmed[0]) && Regex.IsMatch(trimmed, @"^\d+\.\s"));
+                              IsListOrQuoteLine(trimmed);
 
                 level = FoldLevelBase + 7 + Math.Min(10, indent / 2);
                 if (isList && i + 1 < maxLines)
@@ -752,7 +752,6 @@ public sealed class MarkdownScintilla : Scintilla
         ClearSearchHighlights();
         if (string.IsNullOrEmpty(keyword)) return;
 
-        // 全文 C# 忽略大小写匹配，确保中文/Unicode/ASCII 高亮与后端 SearchOccurrences 完全一致
         string docText = Text;
         IndicatorCurrent = IndicatorAllMatch;
         int searchPos = 0;
@@ -836,7 +835,6 @@ public sealed class VirtualizedMarkdownPreview
     private readonly FileArchiveService _files;
     private readonly FontFamily _monoFamily = new("Consolas, Courier New");
 
-    // 图片解码 LRU 内存缓存，避免虚拟化滚出滑入重复读盘阻塞 UI 线程
     private readonly Dictionary<string, (long Ticks, BitmapSource Image)> _imgCache = new(StringComparer.OrdinalIgnoreCase);
     private readonly LinkedList<string> _imgCacheOrder = new();
     private const int MaxCachedImages = 48;
@@ -897,7 +895,7 @@ public sealed class VirtualizedMarkdownPreview
 
     public void RebuildVisibleBlocks()
     {
-        var desired = new List<PreviewBlockVM>(AllBlocks.Count);
+        VisibleBlocks.Clear();
         int hiddenUnderLevel = 0;
 
         foreach (var blk in AllBlocks)
@@ -907,25 +905,21 @@ public sealed class VirtualizedMarkdownPreview
                 if (hiddenUnderLevel > 0 && blk.HeadingLevel > hiddenUnderLevel)
                     continue;
                 hiddenUnderLevel = blk.IsCollapsed ? blk.HeadingLevel : 0;
-                desired.Add(blk);
+                VisibleBlocks.Add(blk);
             }
             else
             {
                 if (hiddenUnderLevel > 0) continue;
-                desired.Add(blk);
+                VisibleBlocks.Add(blk);
             }
         }
-
-        // 增量同步 VisibleBlocks 而非暴力 Clear+重新赋 ItemsSource，最大程度保留虚拟化与滚动位置
-        VisibleBlocks.Clear();
-        foreach (var item in desired) VisibleBlocks.Add(item);
     }
 
-    public PreviewBlockVM? EnsureLineVisibleAndFindBlock(int targetLine)
+    public bool EnsureLineVisibleAndFindBlock(int targetLine, out PreviewBlockVM? foundBlock)
     {
         PreviewBlockVM? lastHeading = null;
         var activeHeadings = new Stack<PreviewBlockVM>();
-        PreviewBlockVM? found = null;
+        foundBlock = null;
 
         foreach (var blk in AllBlocks)
         {
@@ -939,26 +933,26 @@ public sealed class VirtualizedMarkdownPreview
 
             if (blk.StartLine <= targetLine && targetLine <= blk.EndLine)
             {
-                found = blk;
+                foundBlock = blk;
                 break;
             }
             if (blk.StartLine > targetLine)
             {
-                found = lastHeading ?? blk;
+                foundBlock = lastHeading ?? blk;
                 break;
             }
         }
 
-        if (found != null)
+        if (foundBlock != null)
         {
             bool changed = false;
             foreach (var h in activeHeadings)
             {
-                if (h != found && h.IsCollapsed) { h.IsCollapsed = false; changed = true; }
+                if (h != foundBlock && h.IsCollapsed) { h.IsCollapsed = false; changed = true; }
             }
-            if (changed) RebuildVisibleBlocks();
+            return changed;
         }
-        return found;
+        return false;
     }
 
     public UIElement BuildBlockElement(PreviewBlockVM vm, double fontSize, string? highlightKw)
@@ -1286,8 +1280,9 @@ public sealed class VirtualizedMarkdownPreview
             {
                 System.Threading.Thread.Sleep(25);
             }
-            catch
+            catch (Exception ex)
             {
+                AppLogger.Error(nameof(TrySetClipboardText), ex);
                 return false;
             }
         }
@@ -1486,6 +1481,7 @@ public sealed class VirtualizedMarkdownPreview
         }
         catch (Exception ex)
         {
+            AppLogger.Error($"BuildImageControl: {resolved}", ex);
             return new TextBlock
             {
                 Text = $"[图片加载失败: {ex.Message}]",
