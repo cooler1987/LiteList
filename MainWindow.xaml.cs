@@ -7,6 +7,7 @@ using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -118,10 +119,25 @@ public partial class MainWindow : Window
     [STAThread]
     public static void Main(string[] args)
     {
+        AppLogger.Info("LiteList starting...");
+
+        AppDomain.CurrentDomain.UnhandledException += (_, eArgs) =>
+        {
+            AppLogger.Error("AppDomain.UnhandledException", eArgs.ExceptionObject as Exception);
+        };
+        TaskScheduler.UnobservedTaskException += (_, eArgs) =>
+        {
+            AppLogger.Error("TaskScheduler.UnobservedTaskException", eArgs.Exception);
+            eArgs.SetObserved();
+        };
+
         var app = new Application();
         app.DispatcherUnhandledException += (_, eArgs) =>
         {
-            MessageBox.Show($"发生异常：{eArgs.Exception.Message}", "LiteList", MessageBoxButton.OK, MessageBoxImage.Error);
+            AppLogger.Error("DispatcherUnhandledException", eArgs.Exception);
+            MessageBox.Show(
+                $"发生异常：{eArgs.Exception.Message}\n\n详细调试信息已写入日志：\n{AppLogger.LogFilePath}",
+                "LiteList", MessageBoxButton.OK, MessageBoxImage.Error);
             eArgs.Handled = true;
         };
         ThemeHelper.ApplySystemTheme(app.Resources);
@@ -180,7 +196,12 @@ public partial class MainWindow : Window
         _previewEngine = new VirtualizedMarkdownPreview(_files);
         PreviewList.ItemsSource = _previewEngine.VisibleBlocks;
 
-        _previewEngine.HeadingFoldToggled += _ => _previewEngine.RebuildVisibleBlocks();
+        _previewEngine.HeadingFoldToggled += _ =>
+        {
+            PreviewList.ItemsSource = null;
+            _previewEngine.RebuildVisibleBlocks();
+            PreviewList.ItemsSource = _previewEngine.VisibleBlocks;
+        };
         _previewEngine.TaskCheckboxToggled += PreviewEngine_TaskCheckboxToggled;
         _previewEngine.ImageClicked += ShowImageLightbox;
         _previewEngine.AttachmentClicked += OpenAttachmentFile;
@@ -197,13 +218,16 @@ public partial class MainWindow : Window
             if (_settings.SaveMode == SaveMode.IdleAutoSave && _isDirty) SaveCurrentNode();
         };
 
-        _foldAndTocTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(450) };
+        _foldAndTocTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(750) };
         _foldAndTocTimer.Tick += (_, _) =>
         {
             _foldAndTocTimer.Stop();
             if (_selectedNodeId <= 0 || _viewMode != EditorViewMode.Edit || !_editorTextLoaded) return;
+            var sw = Stopwatch.StartNew();
             _scintilla.RebuildFoldLevelsFromText(_scintilla.Text);
             if (_settings.ShowRightToc) RefreshRightTocTree();
+            if (sw.ElapsedMilliseconds > 50)
+                AppLogger.Info($"FoldAndTocTick elapsed={sw.ElapsedMilliseconds}ms");
         };
 
         SystemEvents.UserPreferenceChanged += SystemEvents_UserPreferenceChanged;
@@ -228,12 +252,14 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
+            AppLogger.Error($"MainWindow_Loaded OpenDatabase failed: {targetDb}", ex);
             ShowModalMessage($"无法打开笔记库「{targetDb}」：{ex.Message}\n\n将为你创建或选择其他笔记库。",
                 "打开笔记库失败", MessageBoxButton.OK, MessageBoxImage.Warning);
             var fallback = _db.ResolveDefaultDbPath(_files.AppBaseDir);
             if (!string.Equals(fallback, targetDb, StringComparison.OrdinalIgnoreCase))
             {
-                try { OpenDatabase(fallback); return; } catch { }
+                try { OpenDatabase(fallback); return; }
+                catch (Exception fex) { AppLogger.Error($"Fallback OpenDatabase failed: {fallback}", fex); }
             }
             BtnOpenDb_Click(this, new RoutedEventArgs());
         }
@@ -322,6 +348,7 @@ public partial class MainWindow : Window
     private void EnsureEditorLoaded()
     {
         if (_editorTextLoaded || _selectedNodeId <= 0) return;
+        var sw = Stopwatch.StartNew();
         _suppressEditorEvents = true;
         try
         {
@@ -337,6 +364,7 @@ public partial class MainWindow : Window
             _suppressEditorEvents = false;
         }
         UpdateCursorStatus();
+        AppLogger.Info($"EnsureEditorLoaded node={_selectedNodeId}, chars={_currentContent.Length}, lines={_scintilla.Lines.Count}, elapsed={sw.ElapsedMilliseconds}ms");
     }
 
     // ===== 数据库打开、状态重置与树构建 =====
@@ -369,6 +397,7 @@ public partial class MainWindow : Window
 
     private void OpenDatabase(string dbPath)
     {
+        var sw = Stopwatch.StartNew();
         ResetWorkspaceTransientState();
 
         _db.OpenOrCreate(dbPath);
@@ -381,6 +410,7 @@ public partial class MainWindow : Window
         _settings = _db.LoadSettings();
         ApplySettingsToUI();
         ReloadTree(selectId: null);
+        AppLogger.Info($"OpenDatabase path={_db.CurrentDbPath}, nodes={_nodeLookup.Count}, elapsed={sw.ElapsedMilliseconds}ms");
     }
 
     private void ApplySettingsToUI()
@@ -575,8 +605,9 @@ public partial class MainWindow : Window
 
         if (mode == EditorViewMode.Edit)
         {
+            bool needLoad = !_editorTextLoaded;
             EnsureEditorLoaded();
-            _scintilla.RebuildFoldLevelsFromText(GetCurrentText());
+            if (!needLoad) _scintilla.RebuildFoldLevelsFromText(GetCurrentText());
             if (focusEditor && !isOverlayOpen) _scintilla.Focus();
         }
         else
@@ -590,7 +621,11 @@ public partial class MainWindow : Window
     private void RefreshPreviewFromMemory()
     {
         if (_selectedNodeId <= 0) return;
+        var sw = Stopwatch.StartNew();
+        PreviewList.ItemsSource = null;
         _previewEngine.ParseDocument(GetCurrentText());
+        PreviewList.ItemsSource = _previewEngine.VisibleBlocks;
+        AppLogger.Info($"RefreshPreview node={_selectedNodeId}, blocks={_previewEngine.AllBlocks.Count}, elapsed={sw.ElapsedMilliseconds}ms");
     }
 
     private void RefreshRightTocTree()
@@ -657,7 +692,7 @@ public partial class MainWindow : Window
                 PreviewList.UpdateLayout();
                 PreviewList.ScrollIntoView(blk);
             }
-            catch { }
+            catch (Exception ex) { AppLogger.Error(nameof(SafeScrollPreviewToBlock), ex); }
         }));
     }
 
@@ -672,7 +707,12 @@ public partial class MainWindow : Window
         }
         else
         {
-            var blk = _previewEngine.EnsureLineVisibleAndFindBlock(h.LineNumber);
+            if (_previewEngine.EnsureLineVisibleAndFindBlock(h.LineNumber, out var blk))
+            {
+                PreviewList.ItemsSource = null;
+                _previewEngine.RebuildVisibleBlocks();
+                PreviewList.ItemsSource = _previewEngine.VisibleBlocks;
+            }
             SafeScrollPreviewToBlock(blk);
         }
     }
@@ -752,6 +792,7 @@ public partial class MainWindow : Window
             return;
         }
 
+        var sw = Stopwatch.StartNew();
         _globalHits = _db.SearchOccurrences(
             kw,
             maxHits: 500,
@@ -761,6 +802,7 @@ public partial class MainWindow : Window
 
         LstGlobalHits.ItemsSource = _globalHits;
         _globalHitIndex = -1;
+        AppLogger.Info($"RunGlobalSearch kw=\"{kw}\", hits={_globalHits.Count}, elapsed={sw.ElapsedMilliseconds}ms");
 
         if (_globalHits.Count == 0)
         {
@@ -826,13 +868,17 @@ public partial class MainWindow : Window
             foreach (var b in _previewEngine.AllBlocks) b.IsSearchActive = false;
             if (hit.LineNumber == 0)
             {
-                // 命中标题时仅滚动到顶部，不误高亮正文首段
                 if (_previewEngine.VisibleBlocks.Count > 0)
                     SafeScrollPreviewToBlock(_previewEngine.VisibleBlocks[0]);
             }
             else
             {
-                var targetBlock = _previewEngine.EnsureLineVisibleAndFindBlock(targetLine);
+                if (_previewEngine.EnsureLineVisibleAndFindBlock(targetLine, out var targetBlock))
+                {
+                    PreviewList.ItemsSource = null;
+                    _previewEngine.RebuildVisibleBlocks();
+                    PreviewList.ItemsSource = _previewEngine.VisibleBlocks;
+                }
                 if (targetBlock != null) targetBlock.IsSearchActive = true;
                 SafeScrollPreviewToBlock(targetBlock);
             }
@@ -845,7 +891,6 @@ public partial class MainWindow : Window
     {
         try
         {
-            // 若剪贴板同时包含文本和位图（如 Excel 表格或浏览器富文本），优先处理文件与纯文本引用，避免误把表格转截图
             if (Clipboard.ContainsFileDropList())
             {
                 var list = Clipboard.GetFileDropList();
@@ -880,12 +925,14 @@ public partial class MainWindow : Window
                 }
             }
         }
-        catch (ExternalException)
+        catch (ExternalException ex)
         {
+            AppLogger.Error("Scintilla_PasteIntercepted Clipboard locked", ex);
             TxtSaveStatus.Text = "剪贴板读取失败（正被占用）";
         }
         catch (Exception ex)
         {
+            AppLogger.Error(nameof(Scintilla_PasteIntercepted), ex);
             TxtSaveStatus.Text = $"粘贴归档失败: {ex.Message}";
         }
     }
@@ -896,8 +943,12 @@ public partial class MainWindow : Window
         foreach (var p in paths)
         {
             if (!File.Exists(p)) continue;
-            var res = _files.ImportExternalFile(p);
-            lines.Add(res.IsImage ? $"![{res.Filename}]({res.RelPath})" : $"[{res.Filename}]({res.RelPath})");
+            try
+            {
+                var res = _files.ImportExternalFile(p);
+                lines.Add(res.IsImage ? $"![{res.Filename}]({res.RelPath})" : $"[{res.Filename}]({res.RelPath})");
+            }
+            catch (Exception ex) { AppLogger.Error($"ImportExternalFile: {p}", ex); }
         }
         if (lines.Count > 0)
         {
@@ -973,6 +1024,7 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
+            AppLogger.Error($"ShowImageLightbox: {fullPath}", ex);
             ShowModalMessage($"无法加载大图：{ex.Message}", "图片预览", MessageBoxButton.OK, MessageBoxImage.Warning);
         }
     }
@@ -993,7 +1045,11 @@ public partial class MainWindow : Window
             return;
         }
         try { Process.Start(new ProcessStartInfo(full) { UseShellExecute = true }); }
-        catch (Exception ex) { ShowModalMessage($"无法打开附件：{ex.Message}", "打开失败", MessageBoxButton.OK, MessageBoxImage.Warning); }
+        catch (Exception ex)
+        {
+            AppLogger.Error($"OpenAttachmentFile: {full}", ex);
+            ShowModalMessage($"无法打开附件：{ex.Message}", "打开失败", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
     }
 
     private void SaveAttachmentAsFile(string relPath)
@@ -1010,6 +1066,11 @@ public partial class MainWindow : Window
             var dlg = new SaveFileDialog { FileName = Path.GetFileName(full), Title = "附件另存为" };
             if (dlg.ShowDialog(this) == true) File.Copy(full, dlg.FileName, overwrite: true);
         }
+        catch (Exception ex)
+        {
+            AppLogger.Error($"SaveAttachmentAsFile: {full}", ex);
+            MessageBox.Show(this, $"另存失败：{ex.Message}", "错误", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
         finally { _isModalOpen = false; }
     }
 
@@ -1019,7 +1080,11 @@ public partial class MainWindow : Window
             url.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
         {
             try { Process.Start(new ProcessStartInfo(url) { UseShellExecute = true }); }
-            catch (Exception ex) { ShowModalMessage($"无法打开链接：{ex.Message}", "打开失败", MessageBoxButton.OK, MessageBoxImage.Warning); }
+            catch (Exception ex)
+            {
+                AppLogger.Error($"OpenExternalUrl: {url}", ex);
+                ShowModalMessage($"无法打开链接：{ex.Message}", "打开失败", MessageBoxButton.OK, MessageBoxImage.Warning);
+            }
         }
     }
 
@@ -1174,7 +1239,7 @@ public partial class MainWindow : Window
         UpdateLocalFindMatches(jumpFirst: false);
     }
 
-    // ===== 树操作与原地增删移（保留滚动位置，不误标脏） =====
+    // ===== 树操作与原地增删移 =====
 
     private TreeNodeVM? GetContextTargetNode() => _contextTargetNode ?? (OutlineTree.SelectedItem as TreeNodeVM);
 
@@ -1413,7 +1478,6 @@ public partial class MainWindow : Window
         var targetItem = FindAncestor<TreeViewItem>(e.OriginalSource as DependencyObject);
         if (targetItem?.DataContext is not TreeNodeVM target || target.Id == src.Id) return;
 
-        // 测量节点自身标题头区域高度（避免被已展开的子节点总高度稀释比例）
         var header = targetItem.Template?.FindName("PART_Header", targetItem) as FrameworkElement;
         double headerHeight = (header != null && header.ActualHeight > 0) ? header.ActualHeight : 26.0;
         double relY = header != null ? e.GetPosition(header).Y : e.GetPosition(targetItem).Y;
@@ -1447,6 +1511,7 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
+            AppLogger.Error(nameof(OutlineTree_Drop), ex);
             ShowModalMessage(ex.Message, "移动失败", MessageBoxButton.OK, MessageBoxImage.Warning);
         }
     }
@@ -1495,6 +1560,7 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
+            AppLogger.Error($"BtnNewDb_Click: {picked}", ex);
             ShowModalMessage($"创建新笔记库失败：{ex.Message}", "新建失败", MessageBoxButton.OK, MessageBoxImage.Error);
         }
     }
@@ -1513,7 +1579,11 @@ public partial class MainWindow : Window
         if (string.IsNullOrEmpty(picked)) return;
 
         try { OpenDatabase(picked!); }
-        catch (Exception ex) { ShowModalMessage(ex.Message, "打开失败", MessageBoxButton.OK, MessageBoxImage.Error); }
+        catch (Exception ex)
+        {
+            AppLogger.Error($"BtnOpenDb_Click: {picked}", ex);
+            ShowModalMessage(ex.Message, "打开失败", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
     }
 
     private void BtnExportMenu_Click(object sender, RoutedEventArgs e)
@@ -1543,6 +1613,11 @@ public partial class MainWindow : Window
 
             int copied = _db.ExportMarkdown(nodeId, includeChildren, dlg.FileName, _files, copyAtt);
             TxtSaveStatus.Text = copied > 0 ? $"已导出 MD 及 {copied} 个附件" : "已导出 MD";
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error(nameof(RunExport), ex);
+            MessageBox.Show(this, $"导出失败：{ex.Message}", "导出错误", MessageBoxButton.OK, MessageBoxImage.Error);
         }
         finally { _isModalOpen = false; }
     }
@@ -1742,13 +1817,17 @@ public partial class MainWindow : Window
     }
     private void PreviewFoldAll_Click(object sender, RoutedEventArgs e)
     {
+        PreviewList.ItemsSource = null;
         foreach (var b in _previewEngine.AllBlocks) if (b.HeadingLevel > 0) b.IsCollapsed = true;
         _previewEngine.RebuildVisibleBlocks();
+        PreviewList.ItemsSource = _previewEngine.VisibleBlocks;
     }
     private void PreviewUnfoldAll_Click(object sender, RoutedEventArgs e)
     {
+        PreviewList.ItemsSource = null;
         foreach (var b in _previewEngine.AllBlocks) if (b.HeadingLevel > 0) b.IsCollapsed = false;
         _previewEngine.RebuildVisibleBlocks();
+        PreviewList.ItemsSource = _previewEngine.VisibleBlocks;
     }
 
     private void Scintilla_ShortcutPressed(WF.Keys keyData)
@@ -1782,7 +1861,6 @@ public partial class MainWindow : Window
 
     private void Window_PreviewKeyDown(object sender, KeyEventArgs e)
     {
-        // 当设置或灯箱遮罩层处于打开状态时，仅允许 Esc 关闭浮层，严格屏蔽底层快捷键穿透
         if (LightboxOverlay.Visibility == Visibility.Visible)
         {
             if (e.Key == Key.Escape) LightboxOverlay_Click(sender, null);
@@ -1823,7 +1901,6 @@ public partial class MainWindow : Window
         }
         else if (e.Key == Key.Escape)
         {
-            // 若当前正在重命名树节点，让 RenameBox 自行处理 Escape 回滚，避免误关搜索面板
             if (_nodeLookup.Values.Any(x => x.IsRenaming)) return;
             if (FindBar.Visibility == Visibility.Visible) { BtnCloseFind_Click(sender, e); e.Handled = true; }
             else if (GlobalSearchPanel.Visibility == Visibility.Visible) { BtnCloseGlobalSearch_Click(sender, e); e.Handled = true; }
@@ -1840,10 +1917,15 @@ public partial class MainWindow : Window
     private void Window_Closing(object? sender, CancelEventArgs e)
     {
         if (!EnsureSafeToLeaveCurrent()) { e.Cancel = true; return; }
-        SystemEvents.UserPreferenceChanged -= SystemEvents_UserPreferenceChanged;
-        _idleSaveTimer.Stop();
-        _foldAndTocTimer.Stop();
-        if (_settings.AutoVacuumOnExit) _db.SmartVacuumIfNeeded();
-        _db.Dispose();
+        try
+        {
+            SystemEvents.UserPreferenceChanged -= SystemEvents_UserPreferenceChanged;
+            _idleSaveTimer.Stop();
+            _foldAndTocTimer.Stop();
+            if (_settings.AutoVacuumOnExit) _db.SmartVacuumIfNeeded();
+            _db.Dispose();
+            AppLogger.Info("LiteList exited cleanly.");
+        }
+        catch (Exception ex) { AppLogger.Error(nameof(Window_Closing), ex); }
     }
 }
