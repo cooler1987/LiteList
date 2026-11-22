@@ -561,7 +561,7 @@ public sealed class DatabaseService : IDisposable
             {
                 case "save_mode" when int.TryParse(v, out var sm): s.SaveMode = (SaveMode)sm; break;
                 case "blur_action" when int.TryParse(v, out var ba): s.BlurAction = (BlurAction)ba; break;
-                case "font_size" when double.TryParse(v, NumberStyles.Float, CultureInfo.InvariantCulture, out var fs): s.FontSize = Math.Clamp(fs, 12, 28); break;
+                case "font_size" when double.TryParse(v, NumberStyles.Float, CultureInfo.InvariantCulture, out var fs): s.FontSize = Math.Max(12.0, Math.Min(28.0, fs)); break;
                 case "show_left_tree": s.ShowLeftTree = v != "0"; break;
                 case "show_right_toc": s.ShowRightToc = v != "0"; break;
                 case "auto_vacuum_exit": s.AutoVacuumOnExit = v != "0"; break;
@@ -970,7 +970,7 @@ public sealed class DatabaseService : IDisposable
 
             void WriteItem(long id, string title, string content, int depth)
             {
-                sb.Append(new string('#', Math.Clamp(depth + 1, 1, 6))).Append(' ').AppendLine(title).AppendLine();
+                sb.Append(new string('#', Math.Max(1, Math.Min(6, depth + 1)))).Append(' ').AppendLine(title).AppendLine();
                 if (!string.IsNullOrWhiteSpace(content))
                 {
                     sb.AppendLine(content.TrimEnd()).AppendLine();
