@@ -67,10 +67,10 @@ public sealed class MarkdownScintilla : Scintilla
     private static readonly Regex BoldRegex = new(@"\*\*[^*\r\n]+\*\*", RegexOptions.Compiled);
     private static readonly Regex ItalicRegex = new(@"(?<!\*)\*[^*\s\r\n][^*\r\n]*\*(?!\*)", RegexOptions.Compiled);
     private static readonly Regex StrikeRegex = new(@"~~[^~\r\n]+~~", RegexOptions.Compiled);
-    private static readonly Regex LinkRegex = new(@"!?\[[^\]]*\]\([^)\r\n]+\)", RegexOptions.Compiled);
+    private static readonly Regex LinkRegex = new(@"!?\[[^\]]*\]\([^\)\r\n]+\)", RegexOptions.Compiled);
     private static readonly Regex TaskPrefixRegex = new(@"^\s*[-*+]\s+\[[ xX]\]", RegexOptions.Compiled);
     private static readonly Regex CodeKeywordRegex = new(
-        @"\b(if|else|for|while|switch|case|return|break|continue|func|function|var|let|const|class|struct|interface|public|private|static|void|int|string|bool|true|false|null|nil|None|def|import|from|using|namespace|SELECT|FROM|WHERE|INSERT|UPDATE|DELETE|JOIN|ORDER|BY|CREATE|TABLE)\b",
+        @"\b(if|else|for|while|switch|case|return|break|continue|func|function|var|let|const|class|struct|interface|public|private|static|void|int|string|bool|true|false|null|nil|None|def|import|from|async|await|new|throw|try|catch|finally|using|namespace|enum|extends|implements|this|self|select|insert|update|delete|create|table)\b",
         RegexOptions.Compiled);
     private static readonly Regex CodeStringRegex = new("\"([^\"\\\\]|\\\\.)*\"|'([^'\\\\]|\\\\.)*'", RegexOptions.Compiled);
     private static readonly Regex CodeCommentRegex = new(@"(//.*$|#.*$|--.*$)", RegexOptions.Compiled);
@@ -270,17 +270,17 @@ public sealed class MarkdownScintilla : Scintilla
     /// </summary>
     private void OnStyleNeeded(object? sender, StyleNeededEventArgs e)
     {
-        int startByte = DirectMessage(SCI_GETENDSTYLED).ToInt32();
-        int docByteLen = DirectMessage(SCI_GETTEXTLENGTH).ToInt32();
+        int startByte = DirectMessage(SCI_GETENDSTYLED, IntPtr.Zero, IntPtr.Zero).ToInt32();
+        int docByteLen = DirectMessage(SCI_GETTEXTLENGTH, IntPtr.Zero, IntPtr.Zero).ToInt32();
         if (docByteLen <= 0 || startByte >= docByteLen) return;
 
-        int startLine = DirectMessage(SCI_LINEFROMPOSITION, (IntPtr)startByte).ToInt32();
-        int lineStartByte = DirectMessage(SCI_POSITIONFROMLINE, (IntPtr)startLine).ToInt32();
+        int startLine = DirectMessage(SCI_LINEFROMPOSITION, (IntPtr)startByte, IntPtr.Zero).ToInt32();
+        int lineStartByte = DirectMessage(SCI_POSITIONFROMLINE, (IntPtr)startLine, IntPtr.Zero).ToInt32();
 
         int endLine = LineFromPosition(e.Position);
         int totalLines = Lines.Count;
         int endByte = (endLine + 1 < totalLines)
-            ? DirectMessage(SCI_POSITIONFROMLINE, (IntPtr)(endLine + 1)).ToInt32()
+            ? DirectMessage(SCI_POSITIONFROMLINE, (IntPtr)(endLine + 1), IntPtr.Zero).ToInt32()
             : docByteLen;
 
         int sliceLen = endByte - lineStartByte;
@@ -295,7 +295,7 @@ public sealed class MarkdownScintilla : Scintilla
         bool insideFence = false;
         if (lineStartByte > 0)
         {
-            int prevStyle = DirectMessage(SCI_GETSTYLEAT, (IntPtr)(lineStartByte - 1)).ToInt32();
+            int prevStyle = DirectMessage(SCI_GETSTYLEAT, (IntPtr)(lineStartByte - 1), IntPtr.Zero).ToInt32();
             insideFence = prevStyle == StyleCodeFenceOpen || prevStyle == StyleCodeBlock;
         }
 
@@ -318,12 +318,10 @@ public sealed class MarkdownScintilla : Scintilla
             int lineEnd = nlIdx >= 0 ? nlIdx + 1 : sliceLen;
             int lineByteLen = lineEnd - pos;
 
-            // 剥离末尾 \r\n 长度用于判断纯内容
             int contentByteLen = lineByteLen;
             if (contentByteLen > 0 && buf[pos + contentByteLen - 1] == (byte)'\n') contentByteLen--;
             if (contentByteLen > 0 && buf[pos + contentByteLen - 1] == (byte)'\r') contentByteLen--;
 
-            // 极速字节预扫描：判断本行是否包含任何 Markdown / 代码块触发字节
             bool mayHaveSyntax = insideFence;
             if (!mayHaveSyntax)
             {
@@ -382,7 +380,6 @@ public sealed class MarkdownScintilla : Scintilla
                 continue;
             }
 
-            // 非代码块普通 Markdown 行
             if (IsHeadingLine(trimmed, out _))
             {
                 DirectMessage(SCI_SETSTYLING, (IntPtr)contentByteLen, (IntPtr)StyleHeading);
@@ -392,7 +389,6 @@ public sealed class MarkdownScintilla : Scintilla
                 continue;
             }
 
-            // 如果只有 - 或 + 但并非待办或引用，也不含行内标记，直接并入普通批次
             bool hasInlineMarker = contentText.IndexOfAny(new[] { '*', '`', '~', '[' }) >= 0;
             bool isQuote = trimmed.StartsWith(">", StringComparison.Ordinal);
             bool hasTask = contentByteLen > 4 && TaskPrefixRegex.IsMatch(contentText);
@@ -434,13 +430,14 @@ public sealed class MarkdownScintilla : Scintilla
 
     private void EmitStyledCharsAsUtf8Bytes(string contentText, int[] charStyles, int eolBytes, int eolStyle)
     {
+        char[] contentChars = contentText.ToCharArray();
         int runStart = 0;
         while (runStart < charStyles.Length)
         {
             int st = charStyles[runStart];
             int runEnd = runStart + 1;
             while (runEnd < charStyles.Length && charStyles[runEnd] == st) runEnd++;
-            int byteLen = Encoding.UTF8.GetByteCount(contentText, runStart, runEnd - runStart);
+            int byteLen = Encoding.UTF8.GetByteCount(contentChars, runStart, runEnd - runStart);
             if (byteLen > 0)
                 DirectMessage(SCI_SETSTYLING, (IntPtr)byteLen, (IntPtr)st);
             runStart = runEnd;
@@ -466,9 +463,6 @@ public sealed class MarkdownScintilla : Scintilla
         return level >= 1 && level <= 6 && (level == trimmed.Length || trimmed[level] == ' ');
     }
 
-    /// <summary>
-    /// 纯内存字符串扫描折叠层级，避免逐行通过 ScintillaNET 读取 Lines[i].Text
-    /// </summary>
     public void RebuildFoldLevelsFromText(string fullText)
     {
         if (string.IsNullOrEmpty(fullText)) return;
@@ -523,9 +517,6 @@ public sealed class MarkdownScintilla : Scintilla
         }
     }
 
-    /// <summary>
-    /// 纯内存字符串提取右侧正文大纲树，毫秒级完成，不触碰任何界面控件
-    /// </summary>
     public static ObservableCollection<HeadingNodeVM> ExtractHeadingTreeFromText(string fullText)
     {
         var roots = new ObservableCollection<HeadingNodeVM>();
@@ -599,7 +590,6 @@ public sealed class MarkdownScintilla : Scintilla
         ClearSearchHighlights();
         if (string.IsNullOrEmpty(keyword)) return;
 
-        // 限制全文最多高亮前 120 处匹配，避免搜索常用字时数千次 P/Invoke 卡顿
         IndicatorCurrent = IndicatorAllMatch;
         SearchFlags = SearchFlags.None;
         TargetStart = 0;
