@@ -306,7 +306,7 @@
                              Padding="20,14,20,36"
                              VirtualizingPanel.IsVirtualizing="True"
                              VirtualizingPanel.VirtualizationMode="Standard"
-                             VirtualizingPanel.ScrollUnit="Pixel"
+                             VirtualizingPanel.ScrollUnit="Item"
                              ScrollViewer.CanContentScroll="True"
                              ScrollViewer.HorizontalScrollBarVisibility="Disabled"
                              MouseDoubleClick="PreviewList_MouseDoubleClick"
