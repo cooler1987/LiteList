@@ -19,9 +19,6 @@ using WF = System.Windows.Forms;
 
 namespace LiteList;
 
-/// <summary>
-/// 虚拟化预览列表的按需容器：进入屏幕时构建控件，滑出屏幕后立即释放内存
-/// </summary>
 public sealed class PreviewBlockPresenter : Border
 {
     public static readonly DependencyProperty BlockProperty = DependencyProperty.Register(
@@ -38,6 +35,7 @@ public sealed class PreviewBlockPresenter : Border
 
     public PreviewBlockPresenter()
     {
+        MinHeight = 20;
         Loaded += (_, _) => Rebuild();
         Unloaded += (_, _) => Child = null;
     }
@@ -80,7 +78,6 @@ public partial class MainWindow : Window
     private readonly VirtualizedMarkdownPreview _previewEngine;
 
     private readonly DispatcherTimer _idleSaveTimer;
-    private readonly DispatcherTimer _globalSearchTimer;
 
     private AppSettings _settings = new();
     private EditorViewMode _viewMode = EditorViewMode.Preview;
@@ -88,6 +85,9 @@ public partial class MainWindow : Window
     public ObservableCollection<TreeNodeVM> RootNodes { get; } = new();
 
     private long _selectedNodeId;
+    private string _currentContent = "";      // 纯内存权威正文（惰性加载到 Scintilla）
+    private bool _editorTextLoaded;           // 标记当前节点正文是否已注入 Scintilla
+    private int _cachedLineDigits = 2;
     private bool _isDirty;
     private bool _suppressEditorEvents;
     private bool _suppressSelectionGuard;
@@ -131,9 +131,6 @@ public partial class MainWindow : Window
             _idleSaveTimer.Stop();
             if (_settings.SaveMode == SaveMode.IdleAutoSave && _isDirty) SaveCurrentNode();
         };
-
-        _globalSearchTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(220) };
-        _globalSearchTimer.Tick += (_, _) => { _globalSearchTimer.Stop(); RunGlobalSearch(jumpFirst: false); };
 
         var targetDb = initialDbPath ?? _db.ResolveDefaultDbPath(_files.AppBaseDir);
         OpenDatabase(targetDb);
@@ -194,9 +191,31 @@ public partial class MainWindow : Window
         Add("插入图片 / 附件...", OpenFileAndInsertDialog);
         menu.Items.Add(new WF.ToolStripSeparator());
         Add("查找与替换 (Ctrl+F)", () => OpenFindBar(false));
-        Add("折叠全部标题与缩进块", () => { _scintilla.RebuildFoldLevels(); _scintilla.FoldAll(FoldAction.Contract); });
+        Add("折叠全部标题与缩进块", () => { _scintilla.RebuildFoldLevelsFromText(GetCurrentText()); _scintilla.FoldAll(FoldAction.Contract); });
         Add("展开全部折叠", () => _scintilla.FoldAll(FoldAction.Expand));
         return menu;
+    }
+
+    private string GetCurrentText() => _editorTextLoaded ? _scintilla.Text : _currentContent;
+
+    private void EnsureEditorLoaded()
+    {
+        if (_editorTextLoaded || _selectedNodeId <= 0) return;
+        _suppressEditorEvents = true;
+        try
+        {
+            _scintilla.Text = _currentContent;
+            _scintilla.EmptyUndoBuffer();
+            _scintilla.UpdateLineNumberMarginWidth();
+            _cachedLineDigits = Math.Max(2, _scintilla.Lines.Count.ToString().Length);
+            _scintilla.RebuildFoldLevelsFromText(_currentContent);
+            _editorTextLoaded = true;
+        }
+        finally
+        {
+            _suppressEditorEvents = false;
+        }
+        UpdateCursorStatus();
     }
 
     // ===== 数据库打开、设置应用与树构建 =====
@@ -220,7 +239,7 @@ public partial class MainWindow : Window
         _scintilla.ApplyThemeAndFont(_settings.FontSize);
         ApplyLeftVisibility(_settings.ShowLeftTree);
         ApplyRightVisibility(_settings.ShowRightToc);
-        if (_viewMode == EditorViewMode.Preview) RefreshPreviewFromEditorText();
+        if (_viewMode == EditorViewMode.Preview) RefreshPreviewFromMemory();
     }
 
     private void ApplyLeftVisibility(bool show)
@@ -269,6 +288,8 @@ public partial class MainWindow : Window
     private void ShowEmptyState()
     {
         _selectedNodeId = 0;
+        _currentContent = "";
+        _editorTextLoaded = false;
         _isDirty = false;
         EmptyOverlay.Visibility = Visibility.Visible;
         EditorHeaderBar.Visibility = Visibility.Collapsed;
@@ -341,22 +362,21 @@ public partial class MainWindow : Window
         try
         {
             TxtNodeTitle.Text = detail.Title;
-            _scintilla.Text = detail.Content;
-            _scintilla.EmptyUndoBuffer();
-            _scintilla.UpdateLineNumberMarginWidth();
-            _scintilla.RebuildFoldLevels();
+            _currentContent = detail.Content;
+            // 惰性加载：先不把几万字注入 Scintilla，直到切换到编辑模式再加载
+            _editorTextLoaded = false;
             SetDirtyState(false);
         }
         finally { _suppressEditorEvents = false; }
 
-        UpdateCursorStatus();
+        TxtCursorInfo.Text = "行 1, 列 1";
+        TxtDocStats.Text = $"{_currentContent.Length} 字";
 
-        // 只有在右侧正文大纲开启时才构建标题树，打字过程中绝不触发
         if (_settings.ShowRightToc) RefreshRightTocTree();
 
         var targetMode = preserveExactMode
             ? _viewMode
-            : (string.IsNullOrWhiteSpace(detail.Content) && _viewMode == EditorViewMode.Preview
+            : (string.IsNullOrWhiteSpace(_currentContent) && _viewMode == EditorViewMode.Preview
                 ? EditorViewMode.Edit : _viewMode);
         SetEditorViewMode(targetMode, focusEditor: false);
     }
@@ -373,15 +393,21 @@ public partial class MainWindow : Window
         if (_selectedNodeId <= 0) return;
         _idleSaveTimer.Stop();
         var title = string.IsNullOrWhiteSpace(TxtNodeTitle.Text) ? "未命名节点" : TxtNodeTitle.Text.Trim();
-        _db.SaveNode(_selectedNodeId, title, _scintilla.Text);
+        _currentContent = GetCurrentText();
+        _db.SaveNode(_selectedNodeId, title, _currentContent);
         if (_nodeLookup.TryGetValue(_selectedNodeId, out var vm)) vm.Title = title;
         SetDirtyState(false);
     }
 
-    // ===== 纯净双视图（编辑 / 预览）与虚拟化渲染 =====
+    // ===== 纯净双视图（编辑 / 预览）与惰性/虚拟化渲染 =====
 
     private void SetEditorViewMode(EditorViewMode mode, bool focusEditor = false)
     {
+        if (mode == EditorViewMode.Preview && _editorTextLoaded)
+        {
+            _currentContent = _scintilla.Text;
+        }
+
         _viewMode = mode;
         BtnViewEdit.FontWeight = mode == EditorViewMode.Edit ? FontWeights.Bold : FontWeights.Normal;
         BtnViewPreview.FontWeight = mode == EditorViewMode.Preview ? FontWeights.Bold : FontWeights.Normal;
@@ -391,21 +417,22 @@ public partial class MainWindow : Window
         EditorHost.Visibility = (mode == EditorViewMode.Edit && !isOverlayOpen) ? Visibility.Visible : Visibility.Collapsed;
         PreviewList.Visibility = mode == EditorViewMode.Preview ? Visibility.Visible : Visibility.Collapsed;
 
-        if (mode == EditorViewMode.Preview)
+        if (mode == EditorViewMode.Edit)
+        {
+            EnsureEditorLoaded();
+            if (focusEditor && !isOverlayOpen) _scintilla.Focus();
+        }
+        else
         {
             FindBar.Visibility = Visibility.Collapsed;
-            RefreshPreviewFromEditorText();
-        }
-        else if (focusEditor && !isOverlayOpen)
-        {
-            _scintilla.Focus();
+            RefreshPreviewFromMemory();
         }
     }
 
-    private void RefreshPreviewFromEditorText()
+    private void RefreshPreviewFromMemory()
     {
         if (_selectedNodeId <= 0) return;
-        _previewEngine.ParseDocument(_scintilla.Text);
+        _previewEngine.ParseDocument(GetCurrentText());
         PreviewList.ItemsSource = null;
         PreviewList.ItemsSource = _previewEngine.VisibleBlocks;
     }
@@ -413,12 +440,11 @@ public partial class MainWindow : Window
     private void RefreshRightTocTree()
     {
         if (_selectedNodeId <= 0) { RightTocTree.ItemsSource = null; return; }
-        RightTocTree.ItemsSource = _viewMode == EditorViewMode.Preview
-            ? _previewEngine.ExtractHeadingTree()
-            : _scintilla.ExtractHeadingTree();
+        // 纯内存字符串扫描标题，不调用 Scintilla、不重建 AST
+        RightTocTree.ItemsSource = MarkdownScintilla.ExtractHeadingTreeFromText(GetCurrentText());
     }
 
-    // ===== 编辑事件（零全文大纲扫描，流畅不卡） =====
+    // ===== 编辑事件（极致低开销，打字绝不扫全文） =====
 
     private void TxtNodeTitle_TextChanged(object sender, TextChangedEventArgs e)
     {
@@ -431,7 +457,12 @@ public partial class MainWindow : Window
     private void Scintilla_TextChanged(object? sender, EventArgs e)
     {
         if (_suppressEditorEvents || _selectedNodeId <= 0) return;
-        _scintilla.UpdateLineNumberMarginWidth();
+        int digits = Math.Max(2, _scintilla.Lines.Count.ToString().Length);
+        if (digits != _cachedLineDigits)
+        {
+            _cachedLineDigits = digits;
+            _scintilla.UpdateLineNumberMarginWidth();
+        }
         MarkDirty();
     }
 
@@ -447,33 +478,54 @@ public partial class MainWindow : Window
 
     private void UpdateCursorStatus()
     {
+        if (!_editorTextLoaded) return;
         int pos = _scintilla.CurrentPosition;
         int line = _scintilla.LineFromPosition(pos) + 1;
         int col = _scintilla.GetColumn(pos) + 1;
         TxtCursorInfo.Text = $"行 {line}, 列 {col}";
-        TxtDocStats.Text = $"{_scintilla.TextLength} 字 · {_scintilla.Lines.Count} 行";
+        TxtDocStats.Text = $"{_scintilla.Lines.Count} 行";
     }
 
-    // ===== 右侧树形正文大纲联动 =====
+    // ===== 无崩溃异步滚动跳转（预览与编辑双模式安全支持） =====
+
+    private void SafeScrollPreviewToBlock(PreviewBlockVM? blk)
+    {
+        if (blk == null || PreviewList.Items.Count == 0) return;
+        Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(() =>
+        {
+            try
+            {
+                if (_viewMode != EditorViewMode.Preview || PreviewList.Items.Count == 0) return;
+                PreviewList.UpdateLayout();
+                PreviewList.ScrollIntoView(blk);
+            }
+            catch
+            {
+                // 忽略虚拟化布局竞态异常，绝不崩溃弹窗
+            }
+        }));
+    }
 
     private void RightTocTree_SelectedItemChanged(object sender, RoutedPropertyChangedEventArgs<object> e)
     {
         if (e.NewValue is not HeadingNodeVM h) return;
         if (_viewMode == EditorViewMode.Edit)
         {
+            EnsureEditorLoaded();
             _scintilla.ScrollToLineCentered(h.LineNumber);
             _scintilla.Focus();
         }
         else
         {
             var blk = _previewEngine.EnsureLineVisibleAndFindBlock(h.LineNumber);
-            if (blk != null) PreviewList.ScrollIntoView(blk);
+            SafeScrollPreviewToBlock(blk);
         }
     }
 
     private void BtnRefreshToc_Click(object sender, RoutedEventArgs e)
     {
-        if (_viewMode == EditorViewMode.Edit) _scintilla.RebuildFoldLevels();
+        if (_viewMode == EditorViewMode.Edit && _editorTextLoaded)
+            _scintilla.RebuildFoldLevelsFromText(_scintilla.Text);
         RefreshRightTocTree();
         TxtSaveStatus.Text = "大纲与折叠已刷新";
     }
@@ -500,8 +552,8 @@ public partial class MainWindow : Window
     {
         GlobalSearchPanel.Visibility = Visibility.Collapsed;
         _activeGlobalKeyword = "";
-        _scintilla.ClearSearchHighlights();
-        if (_viewMode == EditorViewMode.Preview) RefreshPreviewFromEditorText();
+        if (_editorTextLoaded) _scintilla.ClearSearchHighlights();
+        if (_viewMode == EditorViewMode.Preview) RefreshPreviewFromMemory();
     }
 
     private void BtnToggleHitList_Changed(object sender, RoutedEventArgs e)
@@ -576,7 +628,6 @@ public partial class MainWindow : Window
         if (hitIdx < 0 || hitIdx >= _globalHits.Count) return;
         var hit = _globalHits[hitIdx];
 
-        // 切到不同节点前检查未保存提示
         if (hit.NodeId != _selectedNodeId)
         {
             if (!EnsureSafeToLeaveCurrent()) return;
@@ -584,7 +635,6 @@ public partial class MainWindow : Window
             try
             {
                 SelectTreeNode(hit.NodeId);
-                // 严格保留当前编辑/预览模式，不擅自切换模式
                 LoadNodeIntoEditor(hit.NodeId, preserveExactMode: true);
             }
             finally { _suppressSelectionGuard = false; }
@@ -605,18 +655,18 @@ public partial class MainWindow : Window
         int targetLine = hit.LineNumber > 0 ? hit.LineNumber : 1;
         if (_viewMode == EditorViewMode.Edit)
         {
+            EnsureEditorLoaded();
             _scintilla.HighlightAndScrollToMatch(_activeGlobalKeyword, targetLine, hit.CharOffsetInLine, hit.MatchLength);
         }
         else
         {
-            // 全程保持预览模式：高亮关键词 + 展开所在标题章节 + 精准滚入该块
             foreach (var b in _previewEngine.AllBlocks) b.IsSearchActive = false;
             var targetBlock = _previewEngine.EnsureLineVisibleAndFindBlock(targetLine);
             if (targetBlock != null) targetBlock.IsSearchActive = true;
 
             PreviewList.ItemsSource = null;
             PreviewList.ItemsSource = _previewEngine.VisibleBlocks;
-            if (targetBlock != null) PreviewList.ScrollIntoView(targetBlock);
+            SafeScrollPreviewToBlock(targetBlock);
         }
     }
 
@@ -686,20 +736,30 @@ public partial class MainWindow : Window
 
     private void InsertSnippet(string text)
     {
+        EnsureEditorLoaded();
         _scintilla.ReplaceSelection(text);
         _scintilla.Focus();
     }
 
     private void PreviewEngine_TaskCheckboxToggled(int lineNum, bool isChecked)
     {
+        var lines = _currentContent.Replace("\r\n", "\n").Split('\n');
         int idx = lineNum - 1;
-        if (idx < 0 || idx >= _scintilla.Lines.Count) return;
-        var line = _scintilla.Lines[idx];
-        var raw = line.Text.TrimEnd('\r', '\n');
-        var updated = isChecked ? Regex.Replace(raw, @"\[ \]", "[x]") : Regex.Replace(raw, @"\[[xX]\]", "[ ]");
-        _scintilla.SetSelection(line.Position + raw.Length, line.Position);
-        _scintilla.ReplaceSelection(updated);
-        RefreshPreviewFromEditorText();
+        if (idx < 0 || idx >= lines.Length) return;
+
+        lines[idx] = isChecked
+            ? Regex.Replace(lines[idx], @"\[ \]", "[x]")
+            : Regex.Replace(lines[idx], @"\[[xX]\]", "[ ]");
+        _currentContent = string.Join("\n", lines);
+
+        if (_editorTextLoaded)
+        {
+            _suppressEditorEvents = true;
+            try { _scintilla.Text = _currentContent; }
+            finally { _suppressEditorEvents = false; }
+        }
+        MarkDirty();
+        RefreshPreviewFromMemory();
     }
 
     private void ShowImageLightbox(string fullPath)
@@ -748,11 +808,12 @@ public partial class MainWindow : Window
             Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
     }
 
-    // ===== 节点内查找与替换（C# Regex Unicode 安全 + 统一主题控件） =====
+    // ===== 节点内查找与替换 =====
 
     private void OpenFindBar(bool focusReplace)
     {
         if (_viewMode == EditorViewMode.Preview) SetEditorViewMode(EditorViewMode.Edit, true);
+        EnsureEditorLoaded();
         FindBar.Visibility = Visibility.Visible;
         var sel = _scintilla.SelectedText;
         if (!string.IsNullOrEmpty(sel) && !sel.Contains("\n")) TxtFind.Text = sel;
@@ -775,13 +836,17 @@ public partial class MainWindow : Window
             var opts = ChkCase.IsChecked == true ? RegexOptions.None : RegexOptions.IgnoreCase;
             var rx = new Regex(ChkRegex.IsChecked == true ? pattern : Regex.Escape(pattern), opts);
             foreach (Match m in rx.Matches(_scintilla.Text))
+            {
                 if (m.Length > 0) _localFindMatches.Add((m.Index, m.Length));
+                if (_localFindMatches.Count >= 500) break;
+            }
         }
         catch { TxtFindCount.Text = "正则错"; return; }
 
         _scintilla.IndicatorCurrent = 0;
-        foreach (var (s, len) in _localFindMatches)
-            _scintilla.IndicatorFillRange(s, len);
+        int drawLimit = Math.Min(120, _localFindMatches.Count);
+        for (int i = 0; i < drawLimit; i++)
+            _scintilla.IndicatorFillRange(_localFindMatches[i].Start, _localFindMatches[i].Length);
 
         if (_localFindMatches.Count > 0)
         {
@@ -1163,7 +1228,6 @@ public partial class MainWindow : Window
     private void CtxSortChildren_Click(object sender, RoutedEventArgs e) { if (OutlineTree.SelectedItem is TreeNodeVM n) { _db.SortChildren(n.Id); ReloadTree(n.Id); } }
     private void CtxDelete_Click(object sender, RoutedEventArgs e) { if (OutlineTree.SelectedItem is TreeNodeVM n) DeleteNodeWithConfirm(n); }
 
-    // ===== 排版命令 =====
     private void WrapSel(string before, string after, string placeholder)
     {
         var sel = _scintilla.SelectedText;
@@ -1209,11 +1273,11 @@ public partial class MainWindow : Window
     private void FmtLink_Click(object sender, RoutedEventArgs e) => WrapSel("[", "](https://)", "链接文字");
     private void FmtTable_Click(object sender, RoutedEventArgs e) => InsertSnippet("\r\n| 列1 | 列2 | 列3 |\r\n| --- | --- | --- |\r\n| 内容 | 内容 | 内容 |\r\n");
     private void FmtInsertFile_Click(object sender, RoutedEventArgs e) => OpenFileAndInsertDialog();
-    private void FmtFoldAll_Click(object sender, RoutedEventArgs e) { _scintilla.RebuildFoldLevels(); _scintilla.FoldAll(FoldAction.Contract); }
+    private void FmtFoldAll_Click(object sender, RoutedEventArgs e) { _scintilla.RebuildFoldLevelsFromText(GetCurrentText()); _scintilla.FoldAll(FoldAction.Contract); }
     private void FmtUnfoldAll_Click(object sender, RoutedEventArgs e) => _scintilla.FoldAll(FoldAction.Expand);
     private void FmtFind_Click(object sender, RoutedEventArgs e) => OpenFindBar(false);
 
-    private void PreviewCopyMd_Click(object sender, RoutedEventArgs e) => Clipboard.SetText(_scintilla.Text);
+    private void PreviewCopyMd_Click(object sender, RoutedEventArgs e) => Clipboard.SetText(GetCurrentText());
     private void PreviewFoldAll_Click(object sender, RoutedEventArgs e)
     {
         foreach (var b in _previewEngine.AllBlocks) if (b.HeadingLevel > 0) b.IsCollapsed = true;
@@ -1224,8 +1288,6 @@ public partial class MainWindow : Window
         foreach (var b in _previewEngine.AllBlocks) if (b.HeadingLevel > 0) b.IsCollapsed = false;
         _previewEngine.RebuildVisibleBlocks();
     }
-
-    // ===== 快捷键统筹（兼容 WPF 与 WinForms Scintilla） =====
 
     private void Scintilla_ShortcutPressed(WF.Keys keyData)
     {
